@@ -1,0 +1,143 @@
+#!/usr/bin/env python
+
+# Copyright (C) 2017 Vladimir Nadvornik
+#
+# This program is free software; you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation; either version 2 of the License, or
+# (at your option) any later version.
+
+import sys
+import numpy as np
+import cv2
+import tifffile
+import argparse
+import os
+
+from astro_utils import rawread, fit_images, poly_bg, sigma_clip, ExpDiff
+parser = argparse.ArgumentParser()
+parser.add_argument("outfile",
+                    help="output tiff file")
+parser.add_argument("infile", nargs='+',
+                    help="input tiff file")
+
+parser.add_argument("--scale", action='store_true', default=False,
+                    help="scale")
+
+parser.add_argument("--zero", type=int, default=0,
+                    help="zero level")
+
+parser.add_argument("--ingamma", type=float, default=1.0,
+                    help="input file gamma")
+parser.add_argument("--outgamma", type=float, default=1.0,
+                    help="output file gamma")
+
+parser.add_argument("--kappa", type=float, default=3.0,
+                    help="kappa")
+
+args = parser.parse_args()
+
+files = []
+scale_coefs = []
+for f in args.infile:
+	if os.path.isfile(f):
+		files.append(f)
+		scale_coefs.append(1.0)
+	else:
+		fn, exp = f.split('@')
+		if not os.path.isfile(fn):
+			print fn, "not found"
+			sys.exit(1)
+		scale = 2.0 ** float(exp)
+		files.append(fn)
+		scale_coefs.append(scale)
+
+n = len(args.infile);
+img = np.atleast_3d(tifffile.TiffFile(files[0]).asarray(memmap=True))
+print img.shape, img.dtype
+
+h, w, channels = img.shape
+	
+col = [1,1,1,3,3][channels]
+outcol = [2,2,2,4,4][channels]
+dt = (cv2.CV_32SC3,  cv2.CV_32S)[col == 1]
+
+images = []
+#
+for i in range(0, n):
+	if i > 0:
+		img = np.atleast_3d(tifffile.TiffFile(files[i]).asarray(memmap=True))
+	images.append(img)
+
+n = len(files)
+
+print n, w, h, channels
+
+
+min_images = []
+min_sum = None
+min_weight = None
+
+if args.scale:
+	a = [ [0] * n ]
+	a[0][0] = 1.0
+	
+	b = [ 1.0 ]
+	weight = [ 1000000 ]
+	
+	for c in range(0, col):
+	
+		edimg = []
+		for i in range(0, n):
+			edimg.append(ExpDiff(images[i][:,:,c], args.zero, args.zero + 10, 50000, 0, i))
+	
+		for i in range(0, n):
+			for j in range(i + 1, n):
+				r, rb, num = edimg[i].diff(edimg[j])
+				print i,j, r, num
+				row = [0] * n
+				row[j] = 1.0
+				row[i] = -1.0*r
+				a.append(row)
+				b.append(0)
+				weight.append(num)
+	print np.array(a)
+	print np.array(b)
+	print np.array(weight)
+	a = np.array(a)
+	b = np.array(b)
+	weight = np.array(weight)
+	aw = a * np.sqrt(weight[:,np.newaxis])
+	bw = b * np.sqrt(weight)
+
+	#scale_coefs = np.linalg.lstsq(a, b)[0]
+
+	scale_coefs = np.linalg.lstsq(aw, bw)[0]
+	scale_coefs = 1.0 / scale_coefs
+
+scale_max = np.amax([65535.0 * c for c in scale_coefs])
+
+print "scale_coefs", scale_coefs
+print "scale_max", scale_max
+		
+outc, num, outsigma = sigma_clip(images, zero = args.zero, scales = scale_coefs, kappa = args.kappa)
+print np.array([[args.zero] * col])
+outc16 = np.array(np.clip(outc * (65535.0 / scale_max) + args.zero, 0, 65535), dtype = np.uint16)
+
+print outc16
+if np.amin(num) > 0:
+	outcol -= 1
+
+out=np.empty([h, w, outcol], np.uint16)
+out[:, :, 0:col] = np.atleast_3d(outc16)
+if (outcol > col):
+	out[:, :, col] = np.where(num, 65535, 0)
+	kwargs = {}
+	if col == 1:
+		kwargs = {'planarconfig': 'contig', 'photometric' : 'minisblack'}
+	tifffile.imsave(args.outfile, out, **kwargs)
+else:
+	tifffile.imsave(args.outfile, out)
+
+#tifffile.imsave("sigma_" + args.outfile, outsigma)
+

@@ -1,0 +1,170 @@
+#!/usr/bin/python
+
+# Copyright (C) 2017 Vladimir Nadvornik
+#
+# This program is free software; you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation; either version 2 of the License, or
+# (at your option) any later version.
+
+import numpy as np
+import cv2
+
+import tifffile
+import argparse
+import sys
+from astro_utils import rawread, normalize, debayer, hp_filt, poly_bg, fit_images, combine_images
+
+
+def apply_flat(img, flat):
+	#flat_bl = cv2.cvtColor(flat, cv2.COLOR_BAYER_BG2RGB)
+	flat_bl = debayer(flat, filt = True)
+	flat_bl = cv2.blur(flat_bl, (5, 5))
+	max_b = np.amax(flat_bl[:, :, 0])
+	max_g = np.amax(flat_bl[:, :, 1])
+	max_r = np.amax(flat_bl[:, :, 2])
+	
+	flat[np.where(flat == 0)] = 1
+	flat = np.array(flat, dtype=np.float32)
+	mulmat = np.empty_like(flat)
+	mulmat[0::2, 0::2] = max_b / flat[0::2, 0::2]
+	mulmat[1::2, 1::2] = max_r / flat[1::2, 1::2]
+	mulmat[0::2, 1::2] = max_g / flat[0::2, 1::2]
+	mulmat[1::2, 0::2] = max_g / flat[1::2, 0::2]
+	return cv2.multiply(img, mulmat, dtype=cv2.CV_32FC1)
+
+def hotpix_find(img):
+	img_hp = hp_filt(img, size = 3)
+	mean, stddev = cv2.meanStdDev(img_hp)
+	print mean, stddev
+
+	hotpix_cnt = np.zeros_like(img, dtype=np.uint8)
+	
+	print hotpix_cnt.shape, img.shape
+	hotpix_cnt[np.where(np.abs(img_hp) > stddev * 10)] += 100
+	cv2.imwrite("hotpix.tif", hotpix_cnt)
+	
+
+
+parser = argparse.ArgumentParser()
+parser.add_argument("infile",
+                    help="input tiff file")
+parser.add_argument("--outfile",
+                    help="output tiff file")
+parser.add_argument("--outbayer",
+                    help="output tiff file before debayer")
+parser.add_argument("--outrgb", nargs=3,
+                    help="output tiff files for R, G, B")
+parser.add_argument("--flat",
+                    help="flat tif")
+parser.add_argument("--dark", nargs='*',
+                    help="dark tif")
+
+parser.add_argument('--poly-bg', type=int, default = 0,
+                   help='order of background polynom')
+
+parser.add_argument('--scale', type=int, default = 4,
+                   help='downscale')
+parser.add_argument('--erode', type=int, default = 0,
+                   help='erode')
+parser.add_argument('--iter', type=int, default = 10,
+                   help='iterations')
+
+parser.add_argument('--min', type=int,
+                   help='min value')
+parser.add_argument('--max', type=int,
+                   help='max value')
+
+parser.add_argument('--zero', type=int, default = 0,
+                   help='output zero level')
+
+args = parser.parse_args()
+
+if args.outrgb is None and args.outfile is None and args.outbayer is None:
+	print "missing output"
+	sys.exit(1)
+
+minval = args.min
+maxval = args.max
+
+np.set_printoptions(edgeitems = 5)
+
+img = rawread(args.infile)
+
+if maxval is None:
+	maxval = np.amax(img)
+
+dark = []
+if args.dark:
+	for d in args.dark:
+		dark.append(rawread(d))
+
+if len(dark) > 0 and minval is None:
+	minval = int(np.median(dark))
+
+if minval is None:
+	minval = int(np.amin(img))
+	
+print "min: %d, max:%d" % (minval, maxval)
+	
+#print img
+img_hp = hp_filt(img)
+
+dark_hp = []
+for d in dark:
+	dark_hp.append(hp_filt(d))
+
+if len(dark) > 0:
+	coefs, n = fit_images(dark_hp, img_hp, 10)
+
+	final_dark = combine_images(dark, coefs, [minval] * len(dark))
+
+	print "dark", np.median(final_dark)
+	img = cv2.subtract(img, final_dark, dtype = cv2.CV_32FC1)
+	#hotpix_find(final_dark)
+
+if args.outbayer is not None:
+	img = np.array(img, dtype=np.uint16)
+	tifffile.imsave(args.outbayer, img)
+	exit(0)
+
+
+img = cv2.subtract(img, minval)
+
+if args.flat:
+	flat = rawread(args.flat)
+	flat = cv2.subtract(flat, minval)
+
+	img = apply_flat(img, flat)
+	#print img
+		
+
+img = cv2.multiply(img, 65535.0 / float(maxval - minval), dtype = cv2.CV_16UC1)
+
+#col = cv2.cvtColor(img, cv2.COLOR_BAYER_BG2RGB)
+col = debayer(img, filt = True)
+
+if args.poly_bg > 0:
+	dark_lp = []
+	dark_lp_src = dark
+	if args.flat:
+		dark_lp_src = dark + [flat]
+		
+	for df in dark_lp_src:
+		df = cv2.blur(df, (100,100))
+		df = cv2.blur(df, (100,100))
+		df = cv2.blur(df, (100,100))
+		dark_lp.append(df)
+	
+	bg = poly_bg(col, order = args.poly_bg, scale = args.scale, erode = args.erode, it = args.iter, darkframes = dark_lp)
+	bg -= args.zero
+	col = cv2.subtract(col, bg, dtype = cv2.CV_16UC3)
+else:
+	col = cv2.add(col, args.zero, dtype = cv2.CV_16UC3)
+
+if args.outfile is not None:
+	tifffile.imsave(args.outfile, col)
+
+if args.outrgb is not None:
+	for i in range(0, 3):
+		tifffile.imsave(args.outrgb[i], col[:, :, i])

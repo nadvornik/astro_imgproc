@@ -1,0 +1,30 @@
+#!/bin/sh -x
+# Copyright (C) 2017 Vladimir Nadvornik
+#
+# This program is free software; you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation; either version 2 of the License, or
+# (at your option) any later version.
+
+
+# usage:
+# proc_darkframe output input1.cr2 input2.cr2 ...
+set -e
+
+OUTBASE=$1
+
+DIR=`dirname "$OUTBASE"`
+mkdir -p "$DIR"
+
+shift
+IMGS=
+for f in "$@" ; do
+    raw2tif "tmp_avg_$f.tiff" "$f"
+    IMGS="$IMGS tmp_avg_$f.tiff"
+done
+sigma-clip "$OUTBASE.tif" $IMGS
+cp "$OUTBASE.tif" "$OUTBASE.tiff"
+exiftool -tagsFromFile "$1" -DNGVersion=1.3.0.0 -PhotometricInterpretation='Color Filter Array' -IFD0:CFARepeatPatternDim='2 2' -IFD0:CFAPattern2='1 0 2 1' -overwrite_original_in_place "$OUTBASE.tiff"
+mv "$OUTBASE.tiff" "$OUTBASE.dng"
+exiftool -tagsFromFile "$1" -overwrite_original_in_place "$OUTBASE.tif"
+rm $IMGS

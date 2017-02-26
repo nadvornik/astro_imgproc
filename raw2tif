@@ -1,0 +1,28 @@
+#!/usr/bin/python
+
+# Copyright (C) 2017 Vladimir Nadvornik
+#
+# This program is free software; you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation; either version 2 of the License, or
+# (at your option) any later version.
+
+import numpy as np
+import cv2
+
+import tifffile
+import argparse
+import sys
+from astro_utils import rawread
+
+parser = argparse.ArgumentParser()
+parser.add_argument("outfile",
+                    help="output tiff file")
+parser.add_argument("infile",
+                    help="input tiff file")
+args = parser.parse_args()
+
+img = rawread(args.infile)
+
+
+tifffile.imsave(args.outfile, img)
