@@ -17,7 +17,7 @@ def normalize(img):
         return cv2.normalize(img, dst, alpha = 0, beta = 255, norm_type=cv2.NORM_MINMAX, dtype=cv2.CV_8UC1)
 
 cam_params = {
-	'Canon EOS 40D' : { 'cols': slice(30, 30 + 3908), 'rows': slice(18, 18 + 2602), "masked": slice(0, 30)},
+	'Canon EOS 40D' : { 'cols': slice(30, 30 + 3908), 'rows': slice(18, 18 + 2600), "masked": slice(0, 30)},
 	'Canon EOS 7D' : { 'cols': slice(158, 158 + 5202), 'rows': slice(51, 51 + 3465), "masked": slice(8, 156)}
 }
 
