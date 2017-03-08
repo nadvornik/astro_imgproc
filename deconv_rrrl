@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 
 # Copyright (C) 2017 Vladimir Nadvornik
 #
@@ -140,7 +140,7 @@ def fit_psf(psf):
 	mask[skip] = 0
 	
 	kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (11, 11))
-        mask = cv2.dilate(mask, kernel)
+	mask = cv2.dilate(mask, kernel)
 
 
         # c^2 < 4ab
@@ -192,14 +192,14 @@ def find_ptlist(img):
 		psf = cv2.getRectSubPix(img, (args.diameter * 2 + 1, args.diameter * 2 + 1), (x0, y0))
 		psf, area, mask = fit_psf(psf)
 		(x, y) = sym_center(psf)
-		print "pt", x0, y0, x, y
+		print("pt", x0, y0, x, y)
 		x += x0
 		y += y0
 		
 		psf = cv2.getRectSubPix(img, (args.diameter * 2 + 1, args.diameter * 2 + 1), (x, y))
 		psf, area, mask = fit_psf(psf)
 		
-		print "area", area
+		print("area", area)
 		if area > args.diameter ** 2 * 1.5:
 			continue
 		
@@ -210,7 +210,7 @@ def find_ptlist(img):
 			continue
 			
 		hf = hfr(psf)
-		print "area", area, hf
+		print("area", area, hf)
 		
 
 		ptlist.append([y, x, float(img[y0, x0]), hf, mask, 0 ])
@@ -238,9 +238,9 @@ def find_ptlist(img):
 		
 		A = A0[gkeep]
 		ahfr = ahfr0[gkeep]
-		print "gsigma2", gsigma2, 'len', len(ahfr)
+		print("gsigma2", gsigma2, 'len', len(ahfr))
 	
-	print gkeep
+	print(gkeep)
 	ptlist = [ptlist[i] for i in gkeep[0]]
 	
 	show = normalize(img)
@@ -398,18 +398,18 @@ class VarPsf:
 		psflist = get_psf_list(img, ptlist, psf_filter_sigma)
 		flatpsflist = np.array(psflist).reshape((len(psflist), -1))
 	
-		print "flatpsflist", flatpsflist.shape
+		print("flatpsflist", flatpsflist.shape)
 
 	
 		cov = np.cov(flatpsflist)
-		print "cov", cov
+		print("cov", cov)
 		w, v = np.linalg.eig(cov)
-		print "eig", w
-		print v
+		print("eig", w)
+		print(v)
 	
-		print "eig shape:", v.shape
-		print "len psflist", len(psflist)
-		print "cov shape", cov.shape
+		print("eig shape:", v.shape)
+		print("len psflist", len(psflist))
+		print("cov shape", cov.shape)
 	
 		num_comp = min(20, w.shape[0])
 	
@@ -438,20 +438,20 @@ class VarPsf:
 		Y = np.array([p[0] for p in ptlist])
 		X = np.array([p[1] for p in ptlist])
 	
-		print "X", X
+		print("X", X)
 		A = poly_array(X / 1000.0, Y / 1000.0, 3)
-		print "coef fit"
+		print("coef fit")
 	
 		self.coef_fit = []
 		for coefval in psfcoef:
 			self.coef_fit.append(np.linalg.lstsq(A, coefval)[0])
 	
 
-		print "comp"
+		print("comp")
 		self.comp_scale = []
 		for c in self.coef_fit:
 			v = poly_res(img.shape, c, 3)
-			print cv2.minMaxLoc(v)
+			print(cv2.minMaxLoc(v))
 			self.comp_scale.append(v)
 		
 		self.psfcomplist_flip = [psf[::-1, ::-1] for psf in self.psfcomplist]
@@ -459,8 +459,8 @@ class VarPsf:
 		self.scale = None
 		self.scale = self.apply(np.ones_like(img, dtype = np.float32))
 		
-		print "scale"
-		print cv2.minMaxLoc(self.scale)
+		print("scale")
+		print(cv2.minMaxLoc(self.scale))
 
 	def apply(self, img, flip = False):
 		res = np.zeros_like(img)
@@ -478,7 +478,7 @@ class TilePsf:
 
 		tile_size_h = int((h + args.tiles - 1) / args.tiles)
 		tile_size_w = int((w + args.tiles - 1) / args.tiles)
-		tile_overlap = tile_size_h / 4
+		tile_overlap = int(tile_size_h / 4)
 		self.tile_overlap = tile_overlap
 		
 		self.tiles = []
@@ -508,7 +508,7 @@ class TilePsf:
 					psf.from_psflist(psflist)
 					self.tiles.append((psf, ul, lr, eul_mo, elr_mo))
 
-		print self.tiles
+		print(self.tiles)
 
 	def gaussian(self, img, sigma):
 		
@@ -578,10 +578,10 @@ transp = []
 weights = []
 
 for f in args.infile:
-	print "Read ", f
+	print("Read ", f)
 	img = tifffile.TiffFile(f).asarray(memmap=True)
 	if img is None:
-		print 'Failed to load fn1:', f
+		print('Failed to load fn1:', f)
 		sys.exit(1)
 
 	white = np.iinfo(img.dtype).max
@@ -609,7 +609,7 @@ if args.psffile:
 	for f in [args.psffile]:
 		img = tifffile.TiffFile(f).asarray(memmap=True)
 		if img is None:
-			print 'Failed to load fn1:', f
+			print('Failed to load fn1:', f)
 			sys.exit(1)
 
 		white = np.iinfo(img.dtype).max
@@ -644,8 +644,10 @@ except:
 col = len(src)
 
 sumweights = np.sum(a_weights, axis = 0)
-print "sumweights", sumweights
+print("sumweights", sumweights)
 
+s_res = cv2.GaussianBlur(sum_src,(15,15),0)
+del a_weights
 
 if args.gaussian == 0.0:
 	ptlist = find_ptlist(sum_psfsrc)
@@ -658,7 +660,7 @@ res = [None] * col
 reg_prev = [None] * col
 #over_w = [None] * col
 def step0(c, lock):
-	print "start0  %d" % c
+	print("start0  %d" % c)
 	psf[c] = TilePsf()
 	if args.gaussian == 0.0:
 		c_ptlists[c] = set_psf_level(psfsrc[c], ptlist)
@@ -673,14 +675,12 @@ def step0(c, lock):
 	#c_over_w = np.clip(1.0  -src[c] ** 5, 0.01, 1.0)
 	#over_w[c] = np.array(c_over_w, dtype=np.float32)
 	#print "check c_over_w", np.isnan(c_over_w).any(), cv2.minMaxLoc(c_over_w)
-pfor.pfor(step0, range(0, col))
+pfor.pfor(step0, list(range(0, col)))
 
 
 noise = noise_level(sum_src)
-print "noise:", noise * 65535.0
+print("noise:", noise * 65535.0)
 
-s_res = np.average(res, axis = 0, weights = a_weights)
-del a_weights
 
 
 it = args.iter
@@ -689,24 +689,24 @@ if args.psf_filter_sigma_start == 0:
 
 for i in range(0, it):
 
-	print i
+	print(i)
 	g = [None] * col
 	starprot = [None] * col
 	grad = [None] * col
 	
 	if i == 0 or (i % 5 == 0 and args.psf_filter_sigma_start != args.psf_filter_sigma):
 		filter_sigma = float(it - i) / it * (args.psf_filter_sigma_start - args.psf_filter_sigma) + args.psf_filter_sigma
-		print "filter_sigma", filter_sigma
+		print("filter_sigma", filter_sigma)
 	
 		def step1(c, lock):
-			print "start1 %d %d" %(i,c)
+			print("start1 %d %d" %(i,c))
 		
 			psf[c].extract(psfsrc[c], c_ptlists[c], filter_sigma)
 		
 		
-			print "end1 %d %d" %(i,c)
+			print("end1 %d %d" %(i,c))
 	
-		pfor.pfor(step1, range(0, col))
+		pfor.pfor(step1, list(range(0, col)))
 
 
 
@@ -747,7 +747,7 @@ for i in range(0, it):
 	dat_eps = 1/65536.0**4
 	
 	def step2(c, lock):
-		print "start2 %d %d" %(i,c)
+		print("start2 %d %d" %(i,c))
 
 		b_res = psf[c].apply(res[c])
 		cor = cv2.divide(src[c], b_res)
@@ -817,12 +817,12 @@ for i in range(0, it):
 
 		with lock:
 			#cv2.imwrite("reg_p%d_%d.tif" % (c, i), normalize(reg_p))
-			print "check res", np.isnan(res[c]).any(), cv2.minMaxLoc(res[c])
+			print("check res", np.isnan(res[c]).any(), cv2.minMaxLoc(res[c]))
 		
-			print "check reg_p", np.isnan(reg_p).any(), cv2.minMaxLoc(reg_p)
-			print "check reg_m", np.isnan(reg_m).any(), cv2.minMaxLoc(reg_m)
-			print "check dat", np.isnan(dat).any(), cv2.minMaxLoc(dat)
-			print "check cor", np.isnan(cor).any(), cv2.minMaxLoc(cor)
+			print("check reg_p", np.isnan(reg_p).any(), cv2.minMaxLoc(reg_p))
+			print("check reg_m", np.isnan(reg_m).any(), cv2.minMaxLoc(reg_m))
+			print("check dat", np.isnan(dat).any(), cv2.minMaxLoc(dat))
+			print("check cor", np.isnan(cor).any(), cv2.minMaxLoc(cor))
 
 		
 		cor[np.where(cor < 0.000001)] = 0.000001
@@ -844,15 +844,15 @@ for i in range(0, it):
 
 		if args.gaussian == 0.0:
 			curhfr = get_hfr(res[c], c_ptlists[c])
-			print "hfr", curhfr
+			print("hfr", curhfr)
 			#if i < 3 and curhfr > 2:
 			#	res = cv2.erode(res, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3,3)))
 				
 		if i > args.update_iter:
 			psf[c].update(cor_psf, res[c])
 		
-		print "end2 %d %d" %(i,c)
-	pfor.pfor(step2, range(0, col))
+		print("end2 %d %d" %(i,c))
+	pfor.pfor(step2, list(range(0, col)))
 
 	s_res /= sumweights
 
@@ -868,8 +868,8 @@ for c in range(0, col):
 	res_ch.append(cv2.multiply(res[c], 65535.0, dtype = cv2.CV_16UC1))
 
 splitout = args.outfile.split(',')
-print splitout
-print imgidx
+print(splitout)
+print(imgidx)
 
 if len(imgidx) != len(splitout):
 	splitout = []
@@ -878,7 +878,7 @@ if len(imgidx) != len(splitout):
 		prefix = prefix[:-4]
 	for i, cidx in enumerate(imgidx):
 		splitout.append("%s%04d.tif" % (prefix, i))
-print splitout
+print(splitout)
 for i, fn in enumerate(splitout):
 		res = [res_ch[c] for c in imgidx[i]]
 		

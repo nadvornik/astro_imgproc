@@ -27,8 +27,8 @@ def rawread(name):
 		return np.atleast_3d(img)[:,:, 0]
 
 	camera = None
-	for line in subprocess.check_output(['dcraw', '-i', '-v', name], env={'LANG':'C'}).split('\n'):
-		print line
+	for line in subprocess.check_output(['dcraw', '-i', '-v', name], env={'LANG':'C'}, universal_newlines=True).split('\n'):
+		print(line)
 		if line.startswith('Camera: '):
 			camera = line[len('Camera: '):]
 	
@@ -37,7 +37,7 @@ def rawread(name):
 		img = tifffile.imread(f.name)
 		img = np.atleast_3d(img)[:,:, 0]
 		
-		if cam_params.has_key(camera):
+		if camera in cam_params:
 			p = cam_params[camera]
 			mask = img[p['rows'], p['masked']]
 			
@@ -51,7 +51,7 @@ def rawread(name):
 				mask_m = np.average(mask, axis = 1, weights = w)
 			
 			mask_m -= np.amin(mask_m)
-			print mask_m
+			print(mask_m)
 			
 			img = img[p['rows'], p['cols']]
 			
@@ -104,7 +104,7 @@ def debayer(img, filt = False):
 
 
 def hp_filt(img, size = 5):
-	print img.shape
+	print(img.shape)
 	#col = cv2.cvtColor(img, cv2.COLOR_BAYER_BG2RGB)
 	col = debayer(img)
 	
@@ -176,8 +176,8 @@ def poly_fit(img, mask = None, order = 3, scale = 1, darkframes = []):
 def poly_bg(img, order = 3, scale = 8, it = 4, erode = 0, kappa = 2, transpmask = None, get_mask = False, darkframes = []):
 	img = np.atleast_3d(img)
 	src_shape = img.shape
-	resize_w = (img.shape[1] + scale - 1) / scale
-	resize_h = (img.shape[0] + scale - 1) / scale
+	resize_w = int((img.shape[1] + scale - 1) / scale)
+	resize_h = int((img.shape[0] + scale - 1) / scale)
 	img = cv2.resize(img, (resize_w, resize_h), interpolation=cv2.INTER_AREA)
 	#img = cv2.medianBlur(img, 3)
 	img = np.array(img, dtype = np.float64)
@@ -277,7 +277,7 @@ def fit_images(src_list, target, it = 10, mask = None):
 		var = np.mean(diff2)
 		if var == 0:
 			return coefs, len(solv_b)
-		print coefs, "var:", var, "len", len(solv_b)
+		print(coefs, "var:", var, "len", len(solv_b))
 		keep = np.where(diff2 < var * 4)
 		solv_a = solv_a[keep]
 		solv_b = solv_b[keep]
@@ -301,7 +301,7 @@ def sigma_clip(images, zero = 0, over = 50000, scales = None, adds = None, weigh
 			for i in range(0, n):
 				weights0[i, :] = np.atleast_3d(images[i])[y, :, col] / 65535.0 + 0.0000001
 
-		print weights
+		print(weights)
 		if (weights is not None):
 			for i in range(0, n):
 				weights0[i, :] *= weights[i][y, :]
@@ -342,7 +342,7 @@ def sigma_clip(images, zero = 0, over = 50000, scales = None, adds = None, weigh
 				
 				cur_weights = weights0 * clip
 			
-			print y, c
+			print(y, c)
 			#print "avg", avg
 			#print "sigma", variance ** 0.5
         
@@ -406,7 +406,7 @@ class ExpDiff:
 			if np.sum(w2) == 0:
 				break
 			#b = np.average(pts[:,1] - m * pts[:,0], weights = w2)
-			print m, b
+			print(m, b)
 			ma = (pts[:,1] - b)/pts[:,0]
 			ma[np.where(ma <= 0)] = 0.00000001
 			lma = np.log(ma)
@@ -420,7 +420,7 @@ class ExpDiff:
 			lm = np.average(lma, weights = w)
 			m = np.exp(lm)
 		
-		print m, b
+		print(m, b)
 
 		#pts = pts[np.where(w > 0)]
 		#import matplotlib.pyplot as plt
@@ -490,4 +490,4 @@ def extrapolate_transp(img, transpmask, add = False):
 
 if __name__ == "__main__":
 	a = np.array([[1, 2, 3], [4, 5,6], [7, 8, 9]])
-	print poly_fit(a, order = 2)
+	print(poly_fit(a, order = 2))

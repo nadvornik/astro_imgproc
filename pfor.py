@@ -5,7 +5,7 @@
 # the Free Software Foundation; either version 2 of the License, or
 # (at your option) any later version.
 
-import Queue
+import queue
 import threading
 from line_profiler import LineProfiler
 
@@ -29,12 +29,12 @@ def execute(q, func, lock):
 
 def pfor(func, r, threads = 8):
 	lock = threading.Lock()
-	q = Queue.Queue()
+	q = queue.Queue()
 	for i in r:
 		q.put(i)
 	
 	tt = []
-	for i in xrange(threads):
+	for i in range(threads):
 		if threads == 1:
 			execute(q,func, lock)
 		else:
@@ -51,8 +51,8 @@ def pfor(func, r, threads = 8):
 if __name__ == "__main__":
 	import time
 	def proc(i, lock):
-		print "start %d" % i
+		print("start %d" % i)
 		time.sleep(2)
-		print "stop %d" % i
+		print("stop %d" % i)
 	
-	pfor(proc, range(0, 10))
+	pfor(proc, list(range(0, 10)))

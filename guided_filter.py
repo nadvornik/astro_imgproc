@@ -114,11 +114,11 @@ class GuidedFilterGray:
     def _initFilter(self):
         I = self._I
         r = self._radius
-  	if self.weights is None:
-  		self.weights = 1.0
-  		self._w_mean = 1.0
-  	else:
-  		self._w_mean = boxFilter(self.weights, r)
+        if self.weights is None:
+            self.weights = 1.0
+            self._w_mean = 1.0
+        else:
+            self._w_mean = boxFilter(self.weights, r)
 
         w = self.weights
 
@@ -172,14 +172,14 @@ class GuidedFilterColor:
 
         Ir, Ig, Ib = I[:, :, 0], I[:, :, 1], I[:, :, 2]
 
-  	if self.weights is None:
-  		self.weights = 1.0
-  		self._w_mean = 1.0
-  	else:
-  		self._w_mean = boxFilter(self.weights, r)
+        if self.weights is None:
+            self.weights = 1.0
+            self._w_mean = 1.0
+        else:
+            self._w_mean = boxFilter(self.weights, r)
 
         w = self.weights
-	print "init_color"
+        print("init_color")
         self._Ir_mean = boxFilter(Ir * w, r) / self._w_mean
         self._Ig_mean = boxFilter(Ig * w, r) / self._w_mean
         self._Ib_mean = boxFilter(Ib * w, r) / self._w_mean

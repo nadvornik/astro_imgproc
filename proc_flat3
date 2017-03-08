@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 
 '''
 samples.
@@ -42,7 +42,7 @@ if args.darkframe:
 	darkframe = tifffile.imread(args.darkframe)
 	darkframe = np.atleast_3d(darkframe)[:, :, 0]
 	darkframe_avg = np.median(darkframe)
-	print "darkframe_avg: ", darkframe_avg
+	print("darkframe_avg: ", darkframe_avg)
 
 scale = None
 imgs = None
@@ -57,11 +57,11 @@ for i, flat in enumerate(args.flat):
 	img_float = np.array(img_b, dtype=np.float)
 
 	scale_rgb = flat_coef(img_float)
-	print "scale_rgb: ", scale_rgb
+	print("scale_rgb: ", scale_rgb)
 
 	if scale is None:
 		scale = max(*scale_rgb)
-		print "scale: ", scale
+		print("scale: ", scale)
 
 	
 	img_float[0::2, 0::2] = img_float[0::2, 0::2] * scale / scale_rgb[0]

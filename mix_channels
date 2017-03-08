@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 
 # Copyright (C) 2017 Vladimir Nadvornik
 #
@@ -16,7 +16,7 @@ import argparse
 from astro_utils import ExpDiff, poly_bg
 
 def apply_gamma(img, gamma):
-	lut = np.fromiter( ( (x / 65535.0)**gamma *  65535.0 for x in xrange(65536)), dtype=np.uint16 )
+	lut = np.fromiter( ( (x / 65535.0)**gamma *  65535.0 for x in range(65536)), dtype=np.uint16 )
 	return np.take(lut, np.array(img, dtype=np.int64))
 
 
@@ -53,7 +53,7 @@ transp = None
 
 if args.infile_g is not None:
 	if args.infile_b is None:
-		print "missing b"
+		print("missing b")
 		sys.exit(1)
 	
 	img16_g = tifffile.imread(args.infile_g)
@@ -114,9 +114,9 @@ cam_xyz = np.array([0.6844, -0.0996, -0.0856, -0.3876, 1.1761, 0.2396, -0.0593, 
 xyz_rgb = np.array([0.412453, 0.357580, 0.180423, 0.212671, 0.715160, 0.072169, 0.019334, 0.119193, 0.950227]).reshape((3, 3));
 
 cam_rgb = np.matrix(cam_xyz) * np.matrix(xyz_rgb)
-print cam_rgb
+print(cam_rgb)
 rgb_cam = np.array(cam_rgb.I).T
-print rgb_cam
+print(rgb_cam)
 
 #m = np.array([1,0,0, 0,1,0, 0,0,1]).reshape((3, 3))
 #m = np.array(args.matrix).reshape((3, 3))
@@ -144,7 +144,7 @@ if True:
 
 if False:
 	m, sigma = poly_bg(img[:, :, 1], order = 1, scale = 1, it = 3, get_mask = True)
-	print "sigma", sigma
+	print("sigma", sigma)
 	#filt = cv2.ximgproc.createGuidedFilter(img[:, :, 1], 12, sigma ** 2)
 	filt =  cv2.ximgproc.createDTFilter(img[:, :, 1], 20, sigma * 2)
 	img = filt.filter(img)

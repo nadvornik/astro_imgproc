@@ -1,4 +1,4 @@
-#!/usr/bin/python
+#!/usr/bin/python3
 
 # Copyright (C) 2017 Vladimir Nadvornik
 #
@@ -100,7 +100,7 @@ img /= 65535.0
 
 if args.sigma == 0.0:
 	sigma = noise_level(img)
-	print "sigma", sigma * 65535.0
+	print("sigma", sigma * 65535.0)
 
 else:
 	sigma = args.sigma / 65535.0
@@ -177,7 +177,7 @@ if args.normalize:
 	img = cv2.normalize(img, img, alpha = 0, beta = 65535, norm_type=cv2.NORM_MINMAX, dtype=cv2.CV_16UC3)
 else:
 	img = cv2.divide((img - minval), tuple([(maxval - minval) / 65535.0] * 4), dtype=cv2.CV_16UC3)
-	print "minval", minval, "maxval", maxval
+	print("minval", minval, "maxval", maxval)
 
 if args.outfile is not None:
 	tifffile.imsave(args.outfile, img)

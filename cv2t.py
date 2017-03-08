@@ -1,4 +1,4 @@
-#!/usr/bin/python
+#!/usr/bin/python3
 
 # Copyright (C) 2017 Vladimir Nadvornik
 #
@@ -10,7 +10,7 @@
 import cv2
 import numpy as np
 import io
-import Queue
+import queue
 import threading
 import atexit
 import time
@@ -21,8 +21,8 @@ class MyGUI_CV2(threading.Thread):
 
 	def __init__(self):
 		threading.Thread.__init__(self)
-		self.queue = Queue.Queue()
-		self.key_queue = Queue.Queue()
+		self.queue = queue.Queue()
+		self.key_queue = queue.Queue()
 		self.stop = False
 		self.daemon = True
 		atexit.register(self.terminate)
@@ -44,7 +44,7 @@ class MyGUI_CV2(threading.Thread):
 
 			try:
 				(name, img) = self.queue.get(block=False)
-			except Queue.Empty:
+			except queue.Empty:
 				time.sleep(0.1)
 				continue
 			if img is None:

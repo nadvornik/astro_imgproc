@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 
 # Copyright (C) 2017 Vladimir Nadvornik
 #
@@ -46,7 +46,7 @@ for f in args.infile:
 	else:
 		fn, exp = f.split('@')
 		if not os.path.isfile(fn):
-			print fn, "not found"
+			print(fn, "not found")
 			sys.exit(1)
 		scale = 2.0 ** float(exp)
 		files.append(fn)
@@ -54,7 +54,7 @@ for f in args.infile:
 
 n = len(args.infile);
 img = np.atleast_3d(tifffile.TiffFile(files[0]).asarray(memmap=True))
-print img.shape, img.dtype
+print(img.shape, img.dtype)
 
 h, w, channels = img.shape
 	
@@ -71,7 +71,7 @@ for i in range(0, n):
 
 n = len(files)
 
-print n, w, h, channels
+print(n, w, h, channels)
 
 
 min_images = []
@@ -94,16 +94,16 @@ if args.scale:
 		for i in range(0, n):
 			for j in range(i + 1, n):
 				r, rb, num = edimg[i].diff(edimg[j])
-				print i,j, r, num
+				print(i,j, r, num)
 				row = [0] * n
 				row[j] = 1.0
 				row[i] = -1.0*r
 				a.append(row)
 				b.append(0)
 				weight.append(num)
-	print np.array(a)
-	print np.array(b)
-	print np.array(weight)
+	print(np.array(a))
+	print(np.array(b))
+	print(np.array(weight))
 	a = np.array(a)
 	b = np.array(b)
 	weight = np.array(weight)
@@ -117,14 +117,14 @@ if args.scale:
 
 scale_max = np.amax([65535.0 * c for c in scale_coefs])
 
-print "scale_coefs", scale_coefs
-print "scale_max", scale_max
+print("scale_coefs", scale_coefs)
+print("scale_max", scale_max)
 		
 outc, num, outsigma = sigma_clip(images, zero = args.zero, scales = scale_coefs, kappa = args.kappa)
-print np.array([[args.zero] * col])
+print(np.array([[args.zero] * col]))
 outc16 = np.array(np.clip(outc * (65535.0 / scale_max) + args.zero, 0, 65535), dtype = np.uint16)
 
-print outc16
+print(outc16)
 if np.amin(num) > 0:
 	outcol -= 1
 

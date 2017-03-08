@@ -1,4 +1,4 @@
-#!/usr/bin/python
+#!/usr/bin/python3
 
 # Copyright (C) 2017 Vladimir Nadvornik
 #
@@ -36,11 +36,11 @@ def apply_flat(img, flat):
 def hotpix_find(img):
 	img_hp = hp_filt(img, size = 3)
 	mean, stddev = cv2.meanStdDev(img_hp)
-	print mean, stddev
+	print(mean, stddev)
 
 	hotpix_cnt = np.zeros_like(img, dtype=np.uint8)
 	
-	print hotpix_cnt.shape, img.shape
+	print(hotpix_cnt.shape, img.shape)
 	hotpix_cnt[np.where(np.abs(img_hp) > stddev * 10)] += 100
 	cv2.imwrite("hotpix.tif", hotpix_cnt)
 	
@@ -81,7 +81,7 @@ parser.add_argument('--zero', type=int, default = 0,
 args = parser.parse_args()
 
 if args.outrgb is None and args.outfile is None and args.outbayer is None:
-	print "missing output"
+	print("missing output")
 	sys.exit(1)
 
 minval = args.min
@@ -105,7 +105,7 @@ if len(dark) > 0 and minval is None:
 if minval is None:
 	minval = int(np.amin(img))
 	
-print "min: %d, max:%d" % (minval, maxval)
+print("min: %d, max:%d" % (minval, maxval))
 	
 #print img
 img_hp = hp_filt(img)
@@ -119,7 +119,7 @@ if len(dark) > 0:
 
 	final_dark = combine_images(dark, coefs, [minval] * len(dark))
 
-	print "dark", np.median(final_dark)
+	print("dark", np.median(final_dark))
 	img = cv2.subtract(img, final_dark, dtype = cv2.CV_32FC1)
 	#hotpix_find(final_dark)
 
