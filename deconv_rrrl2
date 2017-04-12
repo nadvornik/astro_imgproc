@@ -20,6 +20,16 @@ from cv2t import cv2t
 from astro_utils import noise_level, poly_bg, poly_res, poly_array,  extrapolate_transp
 from centroid import centroid, sym_center
 
+def crop_param(s):
+	try:
+		if s is None:
+			return None
+		x1,x2,y1,y2 = s.split(',')
+		return (slice(int(y1),int(y2)), slice(int(x1),int(x2)))
+	except:
+    		raise argparse.ArgumentTypeError("Filter param must be r,s")
+
+
 parser = argparse.ArgumentParser()
 parser.add_argument("outfile",
                     help="output tiff file")
@@ -61,6 +71,9 @@ parser.add_argument("--reg-starprot", type=float, default=100,
 
 parser.add_argument("--gaussian", type=float, default=0.0,
                     help="blind with gaussian")
+
+parser.add_argument("--crop", type=crop_param, default=None,
+                    help="crop x1,x2,y1,y2")
 
 
 args = parser.parse_args()
@@ -176,11 +189,12 @@ def find_ptlist(img):
 	#img[np.where(img < 0)] = 0
 
 	sigma = noise_level(img)
-	cmpmax[np.where(img_sub < sigma * 10)] = 0
+	cmpmax[np.where(img_sub <= sigma * 10)] = 0
 	
 	maxval = np.max(img)
 	cmpmax[np.where(img > maxval * 0.9)] = 0
 	
+	cv2t.imshow("cmpmax", normalize(cmpmax))
 
 	(h,w) = img.shape
 	
@@ -329,7 +343,10 @@ class Psf:
 		self.from_psflist(psflist)
 
 	def from_psflist(self, psflist):
+		if len(psflist) == 0:
+			return self.gaussian(None, 1.0)
 		psf = np.median(psflist, axis = 0)
+		psf[np.where(psf < 0)] = 0
 		if psf.sum() == 0:
 			psf[args.diameter, args.diameter] += 1
 		#psf = cv2.GaussianBlur(psf, (args.diameter * 2 + 1, args.diameter * 2 + 1), 1)
@@ -338,7 +355,7 @@ class Psf:
 		self.psf_flip = self.psf[::-1, ::-1]
 		self.updated = False
 		#cv2t.imshow("psf%d" % id(self) , normalize(self.psf ** 0.5))
-		self.center = sym_center(psf)
+		self.center = (0.0, 0.0) #sym_center(psf)
 	
 	def gaussian(self, img, sigma):
 		psf = np.zeros((args.diameter * 2 + 1, args.diameter * 2 + 1), dtype=np.float64)
@@ -350,7 +367,7 @@ class Psf:
 		self.updated = False
 		self.center = (0.0, 0.0)
 
-	def update(self, cor_psf, res):
+	def update(self, cor_psf, dat, res):
 		if not self.updated:
 			self.updated = True
 			self.psf = cv2.GaussianBlur(self.psf, (args.diameter * 2 + 1, args.diameter * 2 + 1), 0.5)
@@ -359,14 +376,11 @@ class Psf:
 		if rs == 0:
 			return
 			
-		anchor = (res.shape[1] / 2, res.shape[0] / 2)
-		weight = 1.0 / (res + 0.01) 
-		weight[np.where(res > 0.8)] = 0.0000000000001
-		weight[np.where(res == 0)] = 0
+		anchor = (int(res.shape[1] / 2), int(res.shape[0] / 2))
 		res = res / rs
 		
-		#cor_psf = cv2.divide(cv2.filter2D(cor_psf * weight, -1, res, anchor = anchor), cv2.filter2D(weight, -1, res, anchor = anchor))
-		cor_psf = cv2.filter2D(cor_psf, -1, res, anchor = anchor)
+		cor_psf = cv2.divide(cv2.filter2D(cor_psf * dat, -1, res, anchor = anchor), cv2.filter2D(dat, -1, res, anchor = anchor))
+		#cor_psf = cv2.filter2D(cor_psf, -1, res, anchor = anchor)
 
 
 		cor_psf = np.array(cor_psf, dtype = np.float32)
@@ -498,6 +512,8 @@ class TilePsf:
 					t_ptlist = [ (py - eul[0], px - eul[1], v, hfr, mask, low) for py, px, v, hfr, mask, low in ptlist if py >= eul[0] and px >= eul[1] and py < elr[0] and px < elr[1] ]
 					if len(t_ptlist) > 10:
 						break
+					if eul == (0,0) and elr == (h,w):
+						break
 					tile_overlap_e *= 2
 				if args.var_psf:
 					psf = VarPsf()
@@ -548,9 +564,16 @@ class TilePsf:
 			#cv2t.waitKey(0)
 		return res
 		
-	def update(self, cor_psf, res):
+	def update(self, cor_psf, dat, res):
 		for psf, ul, lr, eul, elr in self.tiles:
-			psf.update(cor_psf[eul[0] : elr[0], eul[1]: elr[1]], res[eul[0] : elr[0], eul[1]: elr[1]])
+			t_cor_psf = cor_psf[eul[0] : elr[0], eul[1]: elr[1]]
+			t_dat = dat[eul[0] : elr[0], eul[1]: elr[1]]
+			t_res = res[eul[0] : elr[0], eul[1]: elr[1]]
+			t_mask = np.zeros_like(t_res)
+			t_mask[ul[0] - eul[0]:lr[0] - eul[0], ul[1] - eul[1]:lr[1] - eul[1]] = 1
+			t_mask = cv2.blur(t_mask, (self.tile_overlap - 1, self.tile_overlap - 1))
+			t_dat *= t_mask
+			psf.update(t_cor_psf, t_dat, t_res)
 
 def testPsf(shape, psf):
 	test = np.zeros(shape, dtype = np.float64)
@@ -572,18 +595,23 @@ def get_hfr(img, ptlist):
 	return hf / len(ptlist)
 
 class reg_pm_2:
-	def step1(self, res, l):
-		p_res = np.pad(res, ((1, 1), (1, 1)), 'edge')
-		grad_x = np.diff(p_res, axis = 1)
-		grad_xm = np.mean([grad_x[0:-1, :], grad_x[1:, :]], axis = 0)
-		grad_y = np.diff(p_res, axis = 0)
-		grad_ym = np.mean([grad_y[:, 0:-1], grad_y[:, 1:]], axis = 0)
+	def step1(self, res_a, l):
+		g = []
+		for res in res_a:
+			p_res = np.pad(res, ((1, 1), (1, 1)), 'edge')
+			grad_x = np.diff(p_res, axis = 1)
+			grad_xm = np.mean([grad_x[0:-1, :], grad_x[1:, :]], axis = 0)
+			grad_y = np.diff(p_res, axis = 0)
+			grad_ym = np.mean([grad_y[:, 0:-1], grad_y[:, 1:]], axis = 0)
 	
-		lap = cv2.Laplacian(s_res, -1, ksize = 1) 
-		lap = np.pad(lap, ((1, 1), (1, 1)), 'edge')
-		lap = np.mean([lap[:-1,:-1], lap[:-1,1:], lap[1:,:-1], lap[1:,1:]], axis = 0)
-		lap[np.where(lap > 0)] = 0
-		g = grad_xm ** 2 + grad_ym ** 2 + lap ** 2
+			lap = cv2.Laplacian(res, -1, ksize = 1) 
+			lap = np.pad(lap, ((1, 1), (1, 1)), 'edge')
+			lap = np.mean([lap[:-1,:-1], lap[:-1,1:], lap[1:,:-1], lap[1:,1:]], axis = 0)
+			lap[np.where(lap > 0)] = 0
+			
+			
+			g.append( grad_xm ** 2 + grad_ym ** 2 + lap ** 2)
+		g = np.median(g, axis = 0)
 
 		##g /= l ** 2
 		#g = 1 / ( 1 + g ** 0.5) #!
@@ -629,14 +657,11 @@ class reg_pm_2:
 
 
 class reg_pm_4:
-	def step1(self, res, l):
-		g = cv2.Laplacian(s_res, -1, ksize = 1) ** 2
-		##g /= l ** 2
-		#g = 1 / ( 1 + g ** 0.5) #!
-		##g = 1 / ( 1 + g)
-		#g = g / ( 1 + g)**2
-		#g = g**0.5 / ( 1 + g)
-		#g /= starprot
+	def step1(self, res_a, l):
+		g = []
+		for res in res_a:
+			g.append(cv2.Laplacian(res, -1, ksize = 1) ** 2)
+		g = np.median(g, axis = 0)
 
 		g = l ** 2 / ((g ** 0.5 + l) * (g ** 0.5 + l / 10))
 		g = cv2.medianBlur(g, 3)
@@ -654,11 +679,30 @@ class reg_pm_4:
 		return reg
 
 
+def average_src(src, white, weights = None):
+	sum_src = 0.0
+	sum_weights = 0.001
+	
+	if weights is None:
+		weights = [1.0] * len(src)
+	
+	for i in range(0, len(src)):
+		s = np.array(src[i], dtype = np.float32)
+		w = np.array(weights[i], dtype = np.float32)
+		sum_src = sum_src + s / white[i] * w
+		sum_weights = sum_weights + w
+	res = sum_src / sum_weights
+	res[np.where(sum_weights <= 0.001)] = 1024.0 / white[0]
+	return res, sum_weights
+
 src = []
+src_white = []
 psfsrc = []
+psfsrc_white = []
 imgidx = []
 transp = []
 weights = []
+maxval = []
 
 scales = []
 
@@ -715,6 +759,8 @@ for f in args.infile:
 
 		white = np.iinfo(img.dtype).max
 		img = np.atleast_3d(img)
+		if args.crop is not None:
+			img = img[args.crop[0], args.crop[1]]
 		h, w, channels = img.shape
 		col = [1,1,1,3,3][channels]
 	
@@ -722,15 +768,19 @@ for f in args.infile:
 		if channels > col:
 			transp_c = img[:,:,col]
 		
-		mask = np.amin(img, axis = 2)
-		img = extrapolate_transp(img[:,:,0:col], mask, add = True)
+		#mask = np.amin(img, axis = 2)
+		#img = extrapolate_transp(img[:,:,0:col], mask, add = True)
 	
 		outi = outc
 		cidx = []
 		for c in range(0, col):
 			cidx.append(len(src))
-			src.append(cv2.divide(img[:,:, c], white, dtype=cv2.CV_32FC1))
+			src.append(img[:,:, c])
+			src_white.append(white)
 			weights.append(transp_c)
+			
+			mv = np.amax(cv2.medianBlur(img[:,:, c], 3))
+			maxval.append(mv)
 		
 			outmap.append(outi)
 			outc_num[outi] += 1
@@ -742,6 +792,8 @@ for f in args.infile:
 
 scales = np.array(scales)
 scales /= np.amax(scales)
+
+sum_src, sumweights = average_src(src, src_white, weights)
 
 if args.psffile:
 	for f in [args.psffile]:
@@ -756,36 +808,22 @@ if args.psffile:
 		col = [1,1,1,3,3][channels]
 
 		for c in range(0, col):
-			psfsrc.append(cv2.divide(img[:,:, c], white, dtype=cv2.CV_32FC1))
+			psfsrc.append(img[:,:, c])
+			psfsrc_white.append(white)
+
+	sum_psfsrc, sum_psfweights = average_src(psfsrc, psfsrc_white)
 else:
 	psfsrc = src
+	psfsrc_white = src_white
+	sum_psfsrc = sum_src
 
 
-
-try:
-	a_weights = np.array(weights, dtype = np.float32) + 0.0001
-	sum_src = np.average(src, axis = 0, weights = a_weights)
-	sum_psfsrc = np.average(psfsrc, axis = 0, weights = a_weights)
-except:
-	a_weights = []
-	for w in weights:
-		try:
-			fw = float(w)
-			aw = np.ones_like(src[0]) * fw
-			a_weights.append(aw)
-		except:
-			a_weights.append(w)
-	a_weights = np.array(a_weights, dtype = np.float32) + 0.0001
-	sum_src = np.average(src, axis = 0, weights = a_weights)
-	sum_psfsrc = np.average(psfsrc, axis = 0, weights = a_weights)
 
 col = len(src)
 
-sumweights = np.sum(a_weights, axis = 0)
 print("sumweights", sumweights)
 
 s_res = cv2.GaussianBlur(sum_src,(15,15),0)
-del a_weights
 
 if args.gaussian == 0.0:
 	ptlist = find_ptlist(sum_psfsrc)
@@ -804,11 +842,12 @@ kappa = 10.0
 def step0(c, lock):
 	print("start0  %d" % c)
 	psf[c] = TilePsf()
+	psfs = np.array(psfsrc[c], dtype = np.float32) / psfsrc_white[c]
 	if args.gaussian == 0.0:
-		c_ptlists[c] = set_psf_level(psfsrc[c], ptlist)
-		psf[c].extract(psfsrc[c], c_ptlists[c], 0.01)
+		c_ptlists[c] = set_psf_level(psfs, ptlist)
+		psf[c].extract(psfs, c_ptlists[c], 0.01)
 	else:
-		psf[c].gaussian(psfsrc[c], args.gaussian)
+		psf[c].gaussian(psfs, args.gaussian)
 
 	cv2.imwrite("testpsf%d.tif" % (c), normalize(testPsf(psfsrc[c].shape, psf[c])))
 
@@ -818,14 +857,13 @@ def step0(c, lock):
 	#print "check c_over_w", np.isnan(c_over_w).any(), cv2.minMaxLoc(c_over_w)
 pfor.pfor(step0, list(range(0, col)))
 
-bl = cv2.GaussianBlur(src[c],(15,15),0)
 for c in range(0, outchannels):
-	res[c] = bl
+	res[c] = s_res
 
 res = np.array(res)
 
 
-noise = noise_level(sum_src)
+noise = noise_level(sum_src) + 0.00000001
 print("noise:", noise * 65535.0)
 
 
@@ -844,8 +882,9 @@ for i in range(0, it):
 	
 		def step1(c, lock):
 			print("start1 %d %d" %(i,c))
+			psfs = np.array(psfsrc[c], dtype = np.float32) / psfsrc_white[c]
 		
-			psf[c].extract(psfsrc[c], c_ptlists[c], filter_sigma)
+			psf[c].extract(psfs, c_ptlists[c], filter_sigma)
 		
 		
 			print("end1 %d %d" %(i,c))
@@ -854,9 +893,10 @@ for i in range(0, it):
 
 
 	s_res = np.mean(res, axis = 0)
+	print("check s_res", np.isnan(s_res).any(), cv2.minMaxLoc(s_res))
 
-	if i < 10:
-		noise = noise_level(s_res) 
+	#if i < 10:
+	noise = noise_level(s_res) + 0.00000001
 	print("noise:", noise * 65535.0)
 	
 	#starprot = -cv2.Laplacian(s_res, -1, ksize = 5)
@@ -868,28 +908,44 @@ for i in range(0, it):
 	#cv2t.imshow("starprot", normalize(1.0/starprot))
 
 	reg1 = reg_pm_2()
-	reg1.step1(s_res, noise * args.reg_lambda)
+	reg1.step1(res, noise * args.reg_lambda)
 	reg2 = reg_pm_4()
-	reg2.step1(s_res, noise * args.reg_lambda * 4)
+	reg2.step1(res, noise * args.reg_lambda)
 
 	sum_w = np.zeros_like(res)
 	sum_corw = np.zeros_like(res)
 	var_next = np.zeros_like(res)
 
-
-	dat_eps = 1/6553.0**4
+	reg_weight = 1 + (float(i) / it * 500)**2
+	dat_eps = 1/reg_weight**4
 	
 	def step2(c, lock):
 		print("start2 %d %d" %(i,c))
 		outc = outmap[c]
 
 		b_res = psf[c].apply(res[outc])
+		scaled_src = (np.array(src[c], dtype=np.float32) * scales[c] + 1024.0 * (1.0 - scales[c])) / src_white[c]
+
+		weight = np.empty_like(src[c], dtype=np.float32)
+		weight[:, :] = weights[c]
 		
+		w2 = cv2.blur(weight, (100, 100)) / src_white[c]
+		w2 *= w2
+		weight *= w2
+		del w2
 		
-		scaled_src = src[c] * scales[c] + 1024.0 / 65535.0 * (1.0 - scales[c])
+		where_over = np.where((src[c] > maxval[c] * 0.8) & (scaled_src < b_res))
+		weight[where_over] /= 1.0 + (src[c][where_over] - maxval[c] * 0.8) / (src_white[c] / 30)
+		
+		if c < 3:
+			cv2t.imshow("w%d" % c, normalize(weight))
+
+		
+		scaled_src = (np.array(src[c], dtype=np.float32) * scales[c] + 1024.0 * (1.0 - scales[c])) / src_white[c]
+		scaled_src[np.where(weight == 0)] = 1024.0 / src_white[c]
 		
 		dif = scaled_src - b_res
-		mean_w = 0.0000001 / (0.0000001 + dif * dif) * weights[c]
+		mean_w = 0.0000001 / (0.0000001 + dif * dif) * weight
 
 		dif = dif * mean_w
 		dif = cv2.blur(dif, (100,100))
@@ -923,19 +979,24 @@ for i in range(0, it):
 		dat = (dat + dat_eps) ** -0.25
 		dat[clip] = 0.01
 		
-		dat *= weights[c] / 65535.0
+		dat *= weight / src_white[c]
 		
 		del b_res
-
-		cor_mean = np.average(cor, weights = dat)
+		
+		try:
+			cor_mean = np.average(cor, weights = dat)
+		except:
+			cor_mean = 1.0
 		scales[c] /= cor_mean
 		with lock:
-			print("cor mean", np.mean(cor))
+			print("cor mean", cor_mean)
 
 
 		corw = psf[c].apply(cv2.multiply(dat, cor), flip = True)
 		w =  psf[c].apply(dat, flip = True)
 		#cor = psf.apply(cor, flip = True)
+		corw[np.where(corw < 0.0)] = 0.0
+		w[np.where(w < 0.0)] = 0.0
 
 		with lock:
 			#cv2.imwrite("reg_p%d_%d.tif" % (c, i), normalize(reg_p))
@@ -944,16 +1005,17 @@ for i in range(0, it):
 #			print("check reg_p", np.isnan(reg_p).any(), cv2.minMaxLoc(reg_p))
 #			print("check reg_m", np.isnan(reg_m).any(), cv2.minMaxLoc(reg_m))
 			print("check dat", np.isnan(dat).any(), cv2.minMaxLoc(dat))
-#			print("check cor", np.isnan(cor).any(), cv2.minMaxLoc(cor))
+			print("check w", np.isnan(w).any(), cv2.minMaxLoc(w))
+			print("check corw", np.isnan(corw).any(), cv2.minMaxLoc(corw))
 
 			sum_w[outc] += w
 			sum_corw[outc] += corw
 		
-		if c < 3 or c > 100:
+		if c < 3:
 			cv2t.imshow("dat%d" % c, normalize(-dat**0.5))
 				
 		if i > args.update_iter:
-			psf[c].update(cor_psf, res[c])
+			psf[c].update(cor_psf, dat, res[outc])
 		
 		print("end2 %d %d" %(i,c))
 	pfor.pfor(step2, list(range(0, col)))
@@ -965,16 +1027,31 @@ for i in range(0, it):
 	for outc in range(0, outchannels):
 		var[outc] /= outc_num[outc]
 
-		cor = cv2.divide(sum_corw[outc], sum_w[outc])
+		print("check res_pre", np.isnan(res[outc]).any(), cv2.minMaxLoc(res[outc]))
 
-		res[outc] *= cor
+		#cor = cv2.divide(sum_corw[outc], sum_w[outc])
+
+		#res[outc] *= cor
 	
 	
-		reg_weight = args.reg * min(float(i) / (it * 0.3), 1)
-		reg = reg1.step2(res[outc]) + reg2.step2(res[outc]) * 0.5
-		reg = reg * reg_weight * outc_num[outc]
+		#reg_weight = args.reg * min(float(i) / (it * 0.3), 1)
+		reg = reg1.step2(res[outc]) + reg2.step2(res[outc])
+		print("check reg1", np.isnan(reg).any(), cv2.minMaxLoc(reg))
+		reg = reg * reg_weight * args.reg * outc_num[outc]
+		print("check reg2", np.isnan(reg).any(), cv2.minMaxLoc(reg))
 
-		reg /= sum_w[outc]
+		missing = np.where(sum_w[outc] < 1.0)
+		sum_w[outc][missing] = 1
+
+		reg = cv2.divide(reg, sum_w[outc])
+		print("check reg3", np.isnan(reg).any(), cv2.minMaxLoc(reg))
+		
+		reg = cv2.divide(reg, np.clip(res[outc], 1024.0/65535.0, 1))
+
+		print("check reg4", np.isnan(reg).any(), cv2.minMaxLoc(reg))
+
+		reg[missing] = 0
+		print("check reg5", np.isnan(reg).any(), cv2.minMaxLoc(reg))
 
 
 		#reg[np.where(src[c] > 0.95)] /= 1000
@@ -982,12 +1059,12 @@ for i in range(0, it):
 		stddev = float(stddev)
 		reg = np.clip(reg, -stddev * 3, stddev * 3)
 	
-		reg = cv2.GaussianBlur(reg, (3,3), 0.7)
-		if i > 0:
-			reg = reg * 0.1 + reg_prev[outc] * 0.9
-			reg_prev[outc] = reg
-		else:
-			reg_prev[outc] = (reg * 0.1)
+		reg = cv2.GaussianBlur(reg, (3,3), 0.6)
+		#if i > 0:
+		#	reg = reg * 0.1 + reg_prev[outc] * 0.9
+		#	reg_prev[outc] = reg
+		#else:
+		#	reg_prev[outc] = (reg * 0.1)
 		
 		
 		
@@ -999,8 +1076,19 @@ for i in range(0, it):
 	
 		reg_p *= args.reg_plus
 
-		res[outc] *= cv2.divide(1 + reg_p, 1 - reg_m)
+		#res[outc] *= cv2.divide(1 + reg_p, 1 - reg_m)
 
+		cor = cv2.divide(sum_corw[outc] + reg_p, sum_w[outc] - reg_m)
+		cor[missing] = 1.0
+		cor[np.where(cor < 0.01)] = 0.01
+		cor[np.where(cor > 100.)] = 100.
+
+		res[outc] *= cor
+
+		print("check res", np.isnan(res[outc]).any(), cv2.minMaxLoc(res[outc]))
+
+		print("check reg_p", np.isnan(reg_p).any(), cv2.minMaxLoc(reg_p))
+		print("check reg_m", np.isnan(reg_m).any(), cv2.minMaxLoc(reg_m))
 		
 
 		cv2t.imshow("reg_p%d" % outc, normalize(reg_p))
@@ -1016,13 +1104,21 @@ for i in range(0, it):
 	cv2t.waitKey(1)
 	
 res_ch = []
-for c in range(0, outchannels):
-	if args.gaussian == 0.0:
+for outc in range(0, outchannels):
+	reg = reg1.step2(res[outc]) + reg2.step2(res[outc]) * 0.5
+	reg = reg * reg_weight * outc_num[outc]
 
-		psf[c].extract(res[c], c_ptlists[c], 0.01)
-		cv2.imwrite("testpsf%d_res.tif" % (c), normalize(testPsf(src[c].shape, psf[c])))
+	reg = cv2.divide(reg, sum_w[outc])
+	#res[outc] += reg
+
+
+	if args.gaussian == 0.0:
+		psf = TilePsf()
+		pts = set_psf_level(res[outc], ptlist)
+		psf.extract(res[outc], pts, 0.01)
+		cv2.imwrite("testpsf%d_res.tif" % (outc), normalize(testPsf(src[outc].shape, psf)))
 	
-	res_ch.append(cv2.multiply(res[c], 65535.0, dtype = cv2.CV_16UC1))
+	res_ch.append(cv2.multiply(res[outc], 65535.0, dtype = cv2.CV_16UC1))
 
 outidx = 0
 for i, fn in enumerate(outfiles):
