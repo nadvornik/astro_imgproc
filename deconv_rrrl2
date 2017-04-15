@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python
 
 # Copyright (C) 2017 Vladimir Nadvornik
 #
@@ -271,9 +271,11 @@ def set_psf_level(img, ptlist):
 	for p in ptlist:
 		(y, x, v, hfr, mask, low) = p
 		psf = cv2.getRectSubPix(img, (args.diameter * 2 + 1, args.diameter * 2 + 1), (x, y))
-		#low = np.sort(psf[np.where(mask > 0)])
-		#low = np.median(low[0:low.shape[0] / 5])
-		low = poly_bg(psf, order = 1, scale = 1, it = 10)[:, :, 0]
+		low = np.median(psf[np.where(mask > 0)])
+		
+		
+		#low = poly_bg(psf, order = 1, scale = 1, it = 10)[:, :, 0]
+		
 		psf -= low
 		psf[np.where(psf < 0)] = 0
 		psf[np.where(mask == 0)] = 0
@@ -283,12 +285,9 @@ def set_psf_level(img, ptlist):
 	return res
 
 
-def get_psf_list(img, ptlist, psf_filter_sigma):
+def get_psf_list(img, ptlist):
 	img = np.array(img, dtype=np.float32)
 	
-	xy = np.array([ [float(x - args.diameter) / args.diameter, float(y - args.diameter) / args.diameter] for y in range(0, args.diameter * 2 + 1) for x in range(0, args.diameter * 2 + 1) ], dtype=np.float)
-	A0 = poly_array2(xy[:, 0], xy[:, 1])
-
 	psflist = []
 	for (y, x, v, hfr, mask, low) in ptlist:
 		psf = cv2.getRectSubPix(img, (args.diameter * 2 + 1, args.diameter * 2 + 1), (x, y))
@@ -297,20 +296,9 @@ def get_psf_list(img, ptlist, psf_filter_sigma):
 		psf -= low
 		psf[np.where(psf < 0)] = 0
 		
-		psf = rl_simple(psf, PsfGauss(args.diameter * 2 + 1, psf_filter_sigma), 30)
-		psf[np.where(mask == 0)] = 0
+		#psf = rl_simple(psf, PsfGauss(args.diameter * 2 + 1, psf_filter_sigma), 30)
+		#psf[np.where(mask == 0)] = 0
 
-		#psf[args.diameter, args.diameter] += 0.000000001
-		#cv2t.imshow("psf1", normalize(psf))
-		#cv2t.imshow("mask", normalize(mask))
-		
-		
-		
-		#cv2t.waitKey(0)
-		
-		#psf_bg = np.array([psf[:, 0], psf[:, 30], psf[0, :], psf[30, :]])
-		#psf -= np.median(psf_bg)
-		#psf[np.where(psf < 0)] = 0
 		psf /= psf.sum()
 		
 		psflist.append(psf)
@@ -329,6 +317,62 @@ def rl_simple(src, psf, it):
 	return res
 
 
+def rrrl_simple(src, psf, it):
+        zero = 0.001
+        kappa = 6
+	src = np.atleast_3d(src) + zero
+	src[np.where(src < 0)] = 0
+	
+	res = np.mean(src, axis = 0)
+	res = cv2.GaussianBlur(res, (5,5), 0)
+	
+	scales = np.ones((len(src),), dtype=np.float64)
+	
+	for i in range(0, it):
+		b_res = psf.apply(res)
+		b_res[np.where(b_res < 0.0000001)] = 0.0000001
+		
+		sum_w = np.zeros_like(res)
+		sum_corw = np.zeros_like(res)
+		
+		scaled_src = src * scales[:, None, None] + zero * (1.0 - scales[:, None, None])
+		
+		cor = scaled_src / b_res[None, :, :]
+		cor[np.where(cor < 0.00001)] = 0.00001
+		
+		dat = b_res[None, :, :] - scaled_src * (1.0 - np.log(cor))
+		dat = dat * dat
+		
+		var = np.mean(dat, axis = 0)
+		clip = np.where(dat > (var * kappa**2)[None, :, :])
+		
+		
+		dat = (dat + 65535.0**4) ** -0.25
+		
+		dat[clip] = 0.0
+		
+		for c in range(0, len(src)):
+			cor_mean = np.average(cor[c], weights = dat[c])
+			scales[c] /= cor_mean
+
+			corw = psf.apply(cv2.multiply(dat[c], cor[c]), flip = True)
+			w =  psf.apply(dat[c], flip = True)
+
+			corw[np.where(corw < 0.0)] = 0.0
+			w[np.where(w < 0.0)] = 0.0
+
+			sum_w += w
+			sum_corw += corw
+		
+		cor = cv2.divide(sum_corw, sum_w)
+		res *= cor
+	print scales
+	res -= zero
+	res[np.where(res < 0)] = 0
+	return res
+		
+
+
 class PsfGauss:
 	def __init__(self, size, sigma):
 		self.size = size
@@ -339,13 +383,23 @@ class PsfGauss:
 
 class Psf:
 	def extract(self, img, ptlist, psf_filter_sigma):
-		psflist = get_psf_list(img, ptlist, psf_filter_sigma)
-		self.from_psflist(psflist)
+		psflist = get_psf_list(img, ptlist)
+		self.from_psflist(psflist, psf_filter_sigma)
 
-	def from_psflist(self, psflist):
+	def from_psflist(self, psflist, psf_filter_sigma):
 		if len(psflist) == 0:
 			return self.gaussian(None, 1.0)
-		psf = np.median(psflist, axis = 0)
+			
+			
+		psf = rrrl_simple(psflist, PsfGauss(args.diameter * 2 + 1, psf_filter_sigma), 30)
+		mask, sigma = poly_bg(psf, order = 1, scale = 1, it = 10, get_mask = True)
+		mask = mask[:,:,0]
+		mask = cv2.dilate(mask, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9,9)))
+		mask[np.where(psf > np.amax(psf) / 2.0)] = 0
+		mask = cv2.erode(mask, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7,7)))
+		
+		psf -= np.median(psf[np.where(mask > 0)])
+		psf[np.where(mask > 0)] = 0
 		psf[np.where(psf < 0)] = 0
 		if psf.sum() == 0:
 			psf[args.diameter, args.diameter] += 1
@@ -410,7 +464,7 @@ class VarPsf:
 	def extract(self, img, ptlist, psf_filter_sigma):
 
 		flatpsflist = []
-		psflist = get_psf_list(img, ptlist, psf_filter_sigma)
+		psflist = get_psf_list(img, ptlist)
 		flatpsflist = np.array(psflist).reshape((len(psflist), -1))
 	
 		print("flatpsflist", flatpsflist.shape)
@@ -521,8 +575,8 @@ class TilePsf:
 					self.tiles.append((psf, ul, lr, eul, elr))
 				else:
 					psf = Psf()
-					psflist = get_psf_list(img[eul[0] : elr[0], eul[1]: elr[1]], t_ptlist, psf_filter_sigma)
-					psf.from_psflist(psflist)
+					psflist = get_psf_list(img[eul[0] : elr[0], eul[1]: elr[1]], t_ptlist)
+					psf.from_psflist(psflist, psf_filter_sigma)
 					self.tiles.append((psf, ul, lr, eul_mo, elr_mo))
 
 		#print(self.tiles)
@@ -823,7 +877,7 @@ col = len(src)
 
 print("sumweights", sumweights)
 
-s_res = cv2.GaussianBlur(sum_src,(15,15),0)
+s_res = cv2.GaussianBlur(sum_src,(5,5),0)
 
 if args.gaussian == 0.0:
 	ptlist = find_ptlist(sum_psfsrc)
