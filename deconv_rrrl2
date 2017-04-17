@@ -318,8 +318,8 @@ def rl_simple(src, psf, it):
 
 
 def rrrl_simple(src, psf, it):
-        zero = 0.001
-        kappa = 6
+	zero = 0.001
+	kappa = 6
 	src = np.atleast_3d(src) + zero
 	src[np.where(src < 0)] = 0
 	
@@ -366,7 +366,7 @@ def rrrl_simple(src, psf, it):
 		
 		cor = cv2.divide(sum_corw, sum_w)
 		res *= cor
-	print scales
+	print(scales)
 	res -= zero
 	res[np.where(res < 0)] = 0
 	return res
@@ -665,7 +665,7 @@ class reg_pm_2:
 			
 			
 			g.append( grad_xm ** 2 + grad_ym ** 2 + lap ** 2)
-		g = np.median(g, axis = 0)
+		g = np.mean(g, axis = 0)
 
 		##g /= l ** 2
 		#g = 1 / ( 1 + g ** 0.5) #!
@@ -678,10 +678,11 @@ class reg_pm_2:
 		##g = cv2.GaussianBlur(g, (3,3), 0)
 		#g = cv2.dilate(g, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3,3)))
 		
-		g = l ** 2 / ((g ** 0.5 + l) * (g ** 0.5 + l / 10))
-		g = cv2.GaussianBlur(g, (3,3), 0)
+		#g = l ** 2 / ((g ** 0.5 + l) * (g ** 0.5 + l / 10))
+		g = 1. / (1. + (g / l ** 2))
+		#g = cv2.GaussianBlur(g, (3,3), 0)
 		
-		cv2t.imshow("g2", normalize(g))
+		cv2t.imshow("g2_%d" % g.shape[1], normalize(g))
 		self.gx = np.mean([g[1:, 1:-1], g[:-1, 1:-1]], axis = 0)
 		self.gy = np.mean([g[1:-1, 1:], g[1:-1, :-1]], axis = 0)
 
@@ -701,7 +702,7 @@ class reg_pm_2:
 		del grad_xg
 		del grad_yg
 	
-		reg = np.zeros_like(res[outc])
+		reg = np.zeros_like(c)
 		reg[:, 1:-1] +=  grad_xg2
 		reg[1:-1, :] +=  grad_yg2
 
@@ -711,26 +712,148 @@ class reg_pm_2:
 
 
 class reg_pm_4:
+	def __init__(self, size = 3):
+		self.size = size
+
+	def laplacian(self, img):
+		lap = cv2.Laplacian(img, -1, ksize = self.size)
+		#if self.size > 3:
+		#	lap -= cv2.Laplacian(img, -1, ksize = self.size - 2)
+		return lap
+
 	def step1(self, res_a, l):
 		g = []
 		for res in res_a:
-			g.append(cv2.Laplacian(res, -1, ksize = 1) ** 2)
+			g.append(self.laplacian(res) ** 2)
 		g = np.median(g, axis = 0)
 
-		g = l ** 2 / ((g ** 0.5 + l) * (g ** 0.5 + l / 10))
+		#g = l ** 2 / ((g ** 0.5 + l) * (g ** 0.5 + l / 10))
+		g = 1. / (1. + (g / l ** 2))
 		g = cv2.medianBlur(g, 3)
 		g = cv2.erode(g, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3,3)))
 		g = cv2.GaussianBlur(g, (3,3), 0)
 
 		#g = cv2.dilate(g, cv2.getStructuringElement(cv2.MORPH_CROSS, (3,3)))
-		cv2t.imshow("g4", normalize(g))
+		cv2t.imshow("g4_%d" % self.size, normalize(g))
 		self.g = g
 
 	def step2(self, c):
-		lap = cv2.Laplacian(c, -1, ksize = 1)
+		lap = self.laplacian(c)
 		lap *= self.g
-		reg = - cv2.Laplacian(lap, -1, ksize = 1)
+		reg = - self.laplacian(lap)
 		return reg
+
+class reg_pm_2_pyr:
+	def __init__(self, depth = 3):
+		self.depth = depth
+	
+	def gaussian_pyr(self, img):
+		gp = [img]
+		for i in range(self.depth - 1):
+			print(img.shape)
+			img = cv2.pyrDown(img)
+			gp.append(img)
+		return gp
+
+	def step1(self, res_a, l):
+		gp = []
+		for res in res_a:
+			gp.append(self.gaussian_pyr(res))
+		
+		self.levels = []
+		for img in zip(*gp):
+			pm = reg_pm_2()
+			pm.step1(img, l)
+			self.levels.append(pm)
+	
+	def step2(self, c):
+		gp = self.gaussian_pyr(c)
+		resp = []
+		for pm, img in zip(self.levels, gp):
+			print(pm.gx.shape, img.shape)
+			resp.append(pm.step2(img))
+		
+		up = resp[self.depth - 1]
+		for i in range(self.depth - 2, -1, -1):
+			size = (resp[i].shape[1], resp[i].shape[0])
+			up = cv2.pyrUp(up, dstsize = size)
+			up = up + resp[i]
+		return up
+		
+
+
+class reg_pyr:
+	def __init__(self, depth = 3):
+		self.depth = depth
+	
+	def gaussian_pyr(self, img):
+		gp = [img]
+		for i in range(self.depth):
+			img = cv2.pyrDown(img)
+			gp.append(img)
+		return gp
+
+	def gaussian_pyr_er(self, img):
+		gp = [img]
+		for i in range(self.depth):
+			img = cv2.erode(img, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7,7)))
+			img = cv2.pyrDown(img)
+			gp.append(img)
+		return gp
+
+
+
+	def laplacian_pyr(self, img):
+		gp = self.gaussian_pyr(img)
+		
+		lp = []
+		for i in range(self.depth,0,-1):
+			size = (gp[i - 1].shape[1], gp[i - 1].shape[0])
+			up = cv2.pyrUp(gp[i], dstsize = size)
+			lap = cv2.subtract(up, gp[i-1])
+			lp.append(lap)
+		return lp
+
+
+	def step1(self, res_a, l):
+		g = []
+		for res in res_a:
+			g.append(cv2.Laplacian(res, -1, ksize = 3) ** 2)
+			
+		g = np.median(g, axis = 0)
+
+		#g = l ** 2 / ((g ** 0.5 + l) * (g ** 0.5 + l / 10))
+		g = 1. / (1. + (g / l ** 2))
+		g = cv2.medianBlur(g, 3)
+		g = cv2.erode(g, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3,3)))
+		g = cv2.GaussianBlur(g, (3,3), 0)
+
+		#g = cv2.dilate(g, cv2.getStructuringElement(cv2.MORPH_CROSS, (3,3)))
+		
+		gp = self.gaussian_pyr_er(g)[:-1][::-1]
+		
+		for i, g in enumerate(gp):
+			cv2t.imshow("g_pyr_%d" % i, normalize(g))
+		self.g_lp = gp
+
+	def step2(self, c):
+		lp = self.laplacian_pyr(c)
+		reg_lp = []
+		for i in range(self.depth):
+			lp[i] *= self.g_lp[i]
+			reg_lp.append(-cv2.Laplacian(lp[i], -1, ksize = 3))
+		
+		size = (reg_lp[1].shape[1], reg_lp[1].shape[0])
+		up = cv2.pyrUp(reg_lp[0], dstsize = size)
+		for i in range(1, self.depth - 1):
+			size = (reg_lp[i + 1].shape[1], reg_lp[i + 1].shape[0])
+			up = cv2.pyrUp(up + reg_lp[i], dstsize = size)
+		up = up + reg_lp[self.depth - 1]
+		
+		return up
+
+
+
 
 
 def average_src(src, white, weights = None):
@@ -961,9 +1084,11 @@ for i in range(0, it):
 	#starprot = np.mean([starprot[:-1,:-1], starprot[:-1,1:], starprot[1:,:-1], starprot[1:,1:]], axis = 0)
 	#cv2t.imshow("starprot", normalize(1.0/starprot))
 
-	reg1 = reg_pm_2()
+	reg1 = reg_pm_2_pyr()
 	reg1.step1(res, noise * args.reg_lambda)
-	reg2 = reg_pm_4()
+	#reg2 = reg_pm_4(size = 1)
+	#reg2.step1(res, noise * args.reg_lambda)
+	reg2 = reg_pyr(depth = 3)
 	reg2.step1(res, noise * args.reg_lambda)
 
 	sum_w = np.zeros_like(res)
@@ -992,7 +1117,7 @@ for i in range(0, it):
 		weight[where_over] /= 1.0 + (src[c][where_over] - maxval[c] * 0.8) / (src_white[c] / 30)
 		
 		if c < 3:
-			cv2t.imshow("w%d" % c, normalize(weight))
+			cv2t.imshow("w%d" % c, weight)
 
 		
 		scaled_src = (np.array(src[c], dtype=np.float32) * scales[c] + 1024.0 * (1.0 - scales[c])) / src_white[c]
@@ -1041,7 +1166,9 @@ for i in range(0, it):
 			cor_mean = np.average(cor, weights = dat)
 		except:
 			cor_mean = 1.0
-		scales[c] /= cor_mean
+		if outc_num[outc] > 1:
+			scales[c] /= cor_mean
+
 		with lock:
 			print("cor mean", cor_mean)
 
