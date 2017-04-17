@@ -218,7 +218,7 @@ def poly_bg(img, order = 3, scale = 8, it = 4, erode = 0, kappa = 2, transpmask 
 			diff = img[:,:,c] - grad[:,:,c]
 			mean, stddev = cv2.meanStdDev(diff, mask = lowmask[:,:,c])
 			if stddev < eps:
-				break
+				continue
 			
 			lowmask[:,:,c] = cv2.compare(img[:,:,c], grad[:,:,c] + float(stddev) * kappa, cv2.CMP_LE)
 			#if i > 4:
@@ -256,7 +256,7 @@ def combine_images(lst, coefs, sub = None):
 		buf = cv2.scaleAdd(af, c, buf)
 	return buf
 
-def fit_images(src_list, target, it = 10, mask = None):
+def fit_images(src_list, target, it = 10, mask = None, kappa = None, kappa_plus = None):
 	solv_a = np.array([i.ravel() for i in src_list]).T
 	solv_b = target.ravel()
 	
@@ -264,23 +264,35 @@ def fit_images(src_list, target, it = 10, mask = None):
 		keep = np.where(mask.ravel() > 0)
 		solv_a = solv_a[keep]
 		solv_b = solv_b[keep]
-		
+	
+	weights = np.ones_like(solv_b)
 	
 	for i in range(0, it):
 #		print "a", solv_a
 #		print "b", solv_b
-		coefs = np.linalg.lstsq(solv_a, solv_b)[0]
+
+		sqrtw = np.sqrt(weights)
+		solv_aw = solv_a * sqrtw[:, None]
+		solv_bw = solv_b * sqrtw
+		coefs = np.linalg.lstsq(solv_aw, solv_bw)[0]
 	
-		d = combine_images(solv_a.T, coefs).ravel()
+		d = np.dot(solv_a, coefs)
 
 		diff2 = (d - solv_b) ** 2
-		var = np.mean(diff2)
+		var = np.average(diff2, weights = weights)
+		print(i, coefs, "var:", var)
 		if var == 0:
 			return coefs, len(solv_b)
-		print(coefs, "var:", var, "len", len(solv_b))
-		keep = np.where(diff2 < var * 4)
-		solv_a = solv_a[keep]
-		solv_b = solv_b[keep]
+			
+		weights = 1 / (1 + diff2 / var)
+		
+		if kappa is not None:
+			weights[np.where(diff2 > var * kappa ** 2)] = 0
+
+		if kappa_plus is not None:
+			weights[np.where((diff2 > var * kappa_plus ** 2) & (solv_b > d))] = 0
+		
+		
 	return coefs, len(solv_b)
 
 

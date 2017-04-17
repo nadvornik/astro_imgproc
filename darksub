@@ -16,16 +16,21 @@ import sys
 from astro_utils import rawread, normalize, debayer, hp_filt, poly_bg, fit_images, combine_images
 
 
-def apply_flat(img, flat):
-	#flat_bl = cv2.cvtColor(flat, cv2.COLOR_BAYER_BG2RGB)
-	flat_bl = debayer(flat, filt = True)
-	flat_bl = cv2.blur(flat_bl, (5, 5))
-	max_b = np.amax(flat_bl[:, :, 0])
-	max_g = np.amax(flat_bl[:, :, 1])
-	max_r = np.amax(flat_bl[:, :, 2])
+def apply_flat(img, flats, exps):
+	flat = np.ones(img.shape, dtype=np.float32)
+	for i, f in enumerate(flats):
+		f = np.array(f, dtype=np.float32)
+		flat *= f ** exps[i]
+			
+	flat_bl_b = cv2.blur(flat[0::2, 0::2], (100, 100))
+	flat_bl_r = cv2.blur(flat[1::2, 1::2], (100, 100))
+	flat_bl_g = cv2.blur(flat[0::2, 1::2] + flat[1::2, 0::2], (100, 100)) / 2.0
+	
+	max_b = np.amax(flat_bl_b)
+	max_g = np.amax(flat_bl_g)
+	max_r = np.amax(flat_bl_r)
 	
 	flat[np.where(flat == 0)] = 1
-	flat = np.array(flat, dtype=np.float32)
 	mulmat = np.empty_like(flat)
 	mulmat[0::2, 0::2] = max_b / flat[0::2, 0::2]
 	mulmat[1::2, 1::2] = max_r / flat[1::2, 1::2]
@@ -55,7 +60,7 @@ parser.add_argument("--outbayer",
                     help="output tiff file before debayer")
 parser.add_argument("--outrgb", nargs=3,
                     help="output tiff files for R, G, B")
-parser.add_argument("--flat",
+parser.add_argument("--flat", nargs='*',
                     help="flat tif")
 parser.add_argument("--dark", nargs='*',
                     help="dark tif")
@@ -78,6 +83,8 @@ parser.add_argument('--max', type=int,
 parser.add_argument('--zero', type=int, default = 0,
                    help='output zero level')
 
+parser.add_argument("--dark-bg", action='store_true', default=False)
+parser.add_argument("--flat-bg", action='store_true', default=False)
 args = parser.parse_args()
 
 if args.outrgb is None and args.outfile is None and args.outbayer is None:
@@ -131,12 +138,40 @@ if args.outbayer is not None:
 
 img = cv2.subtract(img, minval)
 
+flat = []
 if args.flat:
-	flat = rawread(args.flat)
-	flat = cv2.subtract(flat, minval)
+	for d in args.flat:
+		f = rawread(d)
+		f = cv2.subtract(f, minval)
+		flat.append(f)
 
-	img = apply_flat(img, flat)
-	#print img
+if len(flat) > 0:
+	l_f = []
+	for f in flat:
+		l_f.append(cv2.log(np.array(f, dtype=np.float64)))
+		
+	l_img = cv2.log(np.array(img, dtype=np.float64))
+	#l_img = np.array(img, dtype=np.float64)
+	
+	
+	flat_r = np.zeros_like(l_img)
+	flat_r[1::2, 1::2] = 1
+	
+	flat_b = np.zeros_like(l_img)
+	flat_b[0::2, 0::2] = 1
+	
+	flat_g = np.zeros_like(l_img)
+	flat_g[0::2, 1::2] = 1
+	flat_g[1::2, 0::2] = 1
+	
+	flat_rgb = [flat_r, flat_g, flat_b]
+	
+	
+		
+	exps, n = fit_images(l_f + flat_rgb, l_img, 10, kappa_plus = 3)
+	
+	img = apply_flat(img, flat, exps[:-3])
+	print(img.shape)
 		
 
 img = cv2.multiply(img, 65535.0 / float(maxval - minval), dtype = cv2.CV_16UC1)
@@ -145,18 +180,23 @@ img = cv2.multiply(img, 65535.0 / float(maxval - minval), dtype = cv2.CV_16UC1)
 col = debayer(img, filt = True)
 
 if args.poly_bg > 0:
-	dark_lp = []
-	dark_lp_src = dark
-	if args.flat:
-		dark_lp_src = dark + [flat]
-		
-	for df in dark_lp_src:
-		df = cv2.blur(df, (100,100))
-		df = cv2.blur(df, (100,100))
-		df = cv2.blur(df, (100,100))
-		dark_lp.append(df)
+	bg_img = []
+
+	if len(dark) > 0  and args.dark_bg:
+		bg_img = bg_img + dark
+
 	
-	bg = poly_bg(col, order = args.poly_bg, scale = args.scale, erode = args.erode, it = args.iter, darkframes = dark_lp)
+	if len(flat) > 0  and args.flat_bg:
+		bg_img = bg_img + flat
+		
+	for i in range(len(bg_mg)):
+		df = np.array(bg_img[i], dtype=np.float32)
+		df = cv2.blur(df, (100,100))
+		df = cv2.blur(df, (100,100))
+		df = cv2.blur(df, (100,100))
+		bg_img[i] = df
+	
+	bg = poly_bg(col, order = args.poly_bg, scale = args.scale, erode = args.erode, it = args.iter, darkframes = bg_img)
 	bg -= args.zero
 	col = cv2.subtract(col, bg, dtype = cv2.CV_16UC3)
 else:
