@@ -189,7 +189,7 @@ if args.poly_bg > 0:
 	if len(flat) > 0  and args.flat_bg:
 		bg_img = bg_img + flat
 		
-	for i in range(len(bg_mg)):
+	for i in range(len(bg_img)):
 		df = np.array(bg_img[i], dtype=np.float32)
 		df = cv2.blur(df, (100,100))
 		df = cv2.blur(df, (100,100))
