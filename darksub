@@ -24,10 +24,11 @@ def apply_flat(img, flats, exps):
 			
 	flat_bl_b = cv2.blur(flat[0::2, 0::2], (100, 100))
 	flat_bl_r = cv2.blur(flat[1::2, 1::2], (100, 100))
-	flat_bl_g = cv2.blur(flat[0::2, 1::2] + flat[1::2, 0::2], (100, 100)) / 2.0
+	flat_bl_g1 = cv2.blur(flat[0::2, 1::2], (100, 100))
+	flat_bl_g2 = cv2.blur(flat[1::2, 0::2], (100, 100))
 	
 	max_b = np.amax(flat_bl_b)
-	max_g = np.amax(flat_bl_g)
+	max_g = (np.amax(flat_bl_g1) + np.amax(flat_bl_g2)) / 2.0
 	max_r = np.amax(flat_bl_r)
 	
 	flat[np.where(flat == 0)] = 1

@@ -78,6 +78,9 @@ parser.add_argument("--gaussian", type=float, default=0.0,
 parser.add_argument("--crop", type=crop_param, default=None,
                     help="crop x1,x2,y1,y2")
 
+parser.add_argument("--scale", type=float, default=1,
+                    help="output scale")
+
 
 args = parser.parse_args()
 
@@ -444,7 +447,7 @@ class Psf:
 		if psf.sum() == 0:
 			psf[args.diameter, args.diameter] += 1
 			
-		moffat = PsfMoffat(args.diameter * 2 + 1, 2.35482, 3)
+		moffat = PsfMoffat(args.diameter * 2 + 1, 2.35482 * 2, 2)
 		psf = moffat.apply(psf)
 		psf /= psf.sum()
 		self.psf = psf
@@ -487,6 +490,7 @@ class Psf:
 		#print "mean", np.mean(cor_psf)
 		cor_psf = np.clip(cor_psf, 0.9, 1.1)
 		cor_psf **= args.update_accel
+		cor_psf = cv2.GaussianBlur(cor_psf,(3,3), 0)
 		cv2t.imshow("cor_psf", normalize(cor_psf))
 		if np.all(cor_psf >= 0) and not np.isnan(cor_psf).any():
 			self.psf *= cor_psf
@@ -704,6 +708,12 @@ def mean_clip(src):
 class reg_pm_2:
 	def step1(self, res_a, l):
 		g = []
+		try:
+			l = np.pad(l, ((1, 1), (1, 1)), 'edge')
+			l = np.mean([l[:-1,:-1], l[:-1,1:], l[1:,:-1], l[1:,1:]], axis = 0)
+		except:
+			pass
+		
 		for res in res_a:
 			p_res = np.pad(res, ((1, 1), (1, 1)), 'edge')
 			grad_x = np.diff(p_res, axis = 1)
@@ -711,7 +721,7 @@ class reg_pm_2:
 			grad_y = np.diff(p_res, axis = 0)
 			grad_ym = np.mean([grad_y[:, 0:-1], grad_y[:, 1:]], axis = 0)
 	
-			lap = cv2.GaussianBlur(res, (3,3), 0) - res
+			lap = cv2.GaussianBlur(res, (5,5), 0) - res
 			lap = np.pad(lap, ((1, 1), (1, 1)), 'edge')
 			lap = np.mean([lap[:-1,:-1], lap[:-1,1:], lap[1:,:-1], lap[1:,1:]], axis = 0)
 			lap[np.where(lap > 0)] = 0
@@ -810,19 +820,25 @@ class reg_pm_2_pyr:
 		gp = [img]
 		for i in range(self.depth - 1):
 			print(img.shape)
-			img = cv2.pyrDown(img)
+			try:
+				img = cv2.pyrDown(img)
+			except:
+				pass
 			gp.append(img)
 		return gp
 
 	def step1(self, res_a, l):
+		
+		l = self.gaussian_pyr(l)
+	
 		gp = []
 		for res in res_a:
 			gp.append(self.gaussian_pyr(res))
 		
 		self.levels = []
-		for img in zip(*gp):
+		for img, ll in zip(zip(*gp), l):
 			pm = reg_pm_2()
-			pm.step1(img, l)
+			pm.step1(img, ll)
 			self.levels.append(pm)
 	
 	def step2(self, c):
@@ -848,7 +864,10 @@ class reg_pyr:
 	def gaussian_pyr(self, img):
 		gp = [img]
 		for i in range(self.depth):
-			img = cv2.pyrDown(img)
+			try:
+				img = cv2.pyrDown(img)
+			except:
+				pass
 			gp.append(img)
 		return gp
 
@@ -875,6 +894,8 @@ class reg_pyr:
 
 
 	def step1(self, res_a, l):
+		l = self.gaussian_pyr(l)
+		
 		lps = []
 		for res in res_a:
 			lps.append(self.laplacian_pyr(res))
@@ -890,12 +911,12 @@ class reg_pyr:
 			
 			g = np.mean(g, axis = 0)
 			m = mean_clip(g)
-			lm = (l ** 2) * m 
+			lm = (l[self.depth - i - 1] ** 2) * m 
 
-			g = 1. / (1. + (g / lm) ** 0.5)**0.5
-			if i == self.depth - 1:
-				g = cv2.medianBlur(g, 3)
-			g = cv2.erode(g, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3,3)))
+			g = 1. / (1. + (g / lm) ** 0.5)
+			#if i == self.depth - 1:
+			#	g = cv2.medianBlur(g, 3)
+			#g = cv2.erode(g, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3,3)))
 			g = cv2.GaussianBlur(g, (3,3), 0)
 
 			#g = cv2.dilate(g, cv2.getStructuringElement(cv2.MORPH_CROSS, (3,3)))
@@ -1065,6 +1086,7 @@ for f in args.infile:
 
 scales = np.array(scales)
 scales /= np.amax(scales)
+scales *= args.scale
 
 sum_src, sumweights = average_src(src, src_white, weights)
 
@@ -1182,12 +1204,6 @@ for i in range(0, it):
 	#starprot = np.mean([starprot[:-1,:-1], starprot[:-1,1:], starprot[1:,:-1], starprot[1:,1:]], axis = 0)
 	#cv2t.imshow("starprot", normalize(1.0/starprot))
 
-	reg1 = reg_pm_2_pyr()
-	reg1.step1(res, args.reg_lambda)
-	#reg2 = reg_pm_4(size = 1)
-	#reg2.step1(res, args.reg_lambda)
-	reg2 = reg_pyr(depth = 3)
-	reg2.step1(res, args.reg_lambda)
 
 	sum_w = np.zeros_like(res)
 	sum_corw = np.zeros_like(res)
@@ -1225,15 +1241,15 @@ for i in range(0, it):
 		mean_w = 0.0000001 / (0.0000001 + dif * dif) * weight
 
 		dif = dif * mean_w
-		dif = cv2.blur(dif, (50,50))
-		dif = cv2.blur(dif, (50,50))
-		dif = cv2.blur(dif, (50,50))
-		dif = cv2.blur(dif, (50,50))
+		dif = cv2.blur(dif, (500,500))
+		dif = cv2.blur(dif, (500,500))
+		dif = cv2.blur(dif, (500,500))
+		dif = cv2.blur(dif, (500,500))
 		
-		mean_w = cv2.blur(mean_w, (50,50))
-		mean_w = cv2.blur(mean_w, (50,50))
-		mean_w = cv2.blur(mean_w, (50,50))
-		mean_w = cv2.blur(mean_w, (50,50))
+		mean_w = cv2.blur(mean_w, (500,500))
+		mean_w = cv2.blur(mean_w, (500,500))
+		mean_w = cv2.blur(mean_w, (500,500))
+		mean_w = cv2.blur(mean_w, (500,500))
 		
 		dif = cv2.divide(dif, mean_w)
 
@@ -1303,6 +1319,16 @@ for i in range(0, it):
 	
 	var = var_next
 
+	norm_w = np.clip(np.mean(sum_w) / np.mean(sum_w, axis = 0), 1.0, 5.0)
+	cv2t.imshow("norm_w", norm_w / 5)
+
+	reg1 = reg_pm_2_pyr(depth = 3)
+	reg1.step1(res, args.reg_lambda * norm_w)
+	#reg2 = reg_pm_4(size = 1)
+	#reg2.step1(res, args.reg_lambda * norm_w)
+	reg2 = reg_pyr(depth = 3)
+	reg2.step1(res, args.reg_lambda * norm_w * 2)
+
 	for outc in range(0, outchannels):
 		var[outc] /= outc_num[outc]
 
@@ -1314,7 +1340,7 @@ for i in range(0, it):
 	
 	
 		#reg_weight = args.reg * min(float(i) / (it * 0.3), 1)
-		reg = reg1.step2(res[outc]) + reg2.step2(res[outc])
+		reg = reg1.step2(res[outc]) + reg2.step2(res[outc]) * 2
 		print("check reg1", np.isnan(reg).any(), cv2.minMaxLoc(reg))
 		reg = reg * args.reg
 		#print("check reg2", np.isnan(reg).any(), cv2.minMaxLoc(reg))
@@ -1322,13 +1348,13 @@ for i in range(0, it):
 		missing = np.where(sum_w[outc] < 1.0)
 		sum_w[outc][missing] = 1
 
-		reg = cv2.divide(reg, sum_w[outc])
-		reg *= np.mean(sum_w[outc])
+		#reg = cv2.divide(reg, sum_w[outc])
+		#reg *= np.mean(sum_w[outc])
 		print("check reg3", np.isnan(reg).any(), cv2.minMaxLoc(reg))
 
-		mean, stddev = cv2.meanStdDev(reg)
-		stddev = float(stddev)
-		reg = np.clip(reg, -stddev * 3, stddev * 3)
+		#mean, stddev = cv2.meanStdDev(reg)
+		#stddev = float(stddev)
+		#reg = np.clip(reg, -stddev * 3, stddev * 3)
 
 		
 		#hp = cv2.Laplacian(res[outc], -1, ksize = 7)
@@ -1382,7 +1408,7 @@ for i in range(0, it):
 
 		cv2t.imshow("reg_p%d" % outc, normalize(reg_p))
 		cv2t.imshow("reg_m%d" % outc, normalize(-reg_m))
-		cv2t.imshow("res%d" % outc, normalize(res[outc] ** 0.1))
+		cv2t.imshow("res%d" % outc, normalize(np.clip(res[outc] - 1010/65535.0,10/65535.0,1)** 0.1))
 
 		cv2t.imshow("sumw%d" % outc, normalize(sum_w[outc]))
 
@@ -1396,10 +1422,10 @@ for i in range(0, it):
 	
 res_ch = []
 for outc in range(0, outchannels):
-	reg = reg1.step2(res[outc]) + reg2.step2(res[outc]) * 0.5
-	reg = reg * reg_weight * outc_num[outc]
+	#reg = reg1.step2(res[outc]) + reg2.step2(res[outc]) * 0.5
+	#reg = reg * reg_weight * outc_num[outc]
 
-	reg = cv2.divide(reg, sum_w[outc])
+	#reg = cv2.divide(reg, sum_w[outc])
 	#res[outc] += reg
 
 
