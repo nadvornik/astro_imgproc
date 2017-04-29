@@ -20,6 +20,8 @@ from cv2t import cv2t
 from astro_utils import noise_level, poly_bg, poly_res, poly_array,  extrapolate_transp
 from centroid import centroid, sym_center
 
+from scipy.optimize import curve_fit
+
 def crop_param(s):
 	try:
 		if s is None:
@@ -362,7 +364,7 @@ def rrrl_simple(src, psf, it):
 		clip = np.where(dat > (var * kappa**2)[None, :, :])
 		
 		
-		dat = (dat + 255.0**4) ** -0.25 * weights[:, None, None]
+		dat = (dat + 100.0**4) ** -0.25 * weights[:, None, None]
 		
 		dat[clip] = 0.0
 		
@@ -398,25 +400,68 @@ class PsfGauss:
 		return cv2.GaussianBlur(img, (self.size, self.size), self.sigma)
 
 class PsfMoffat:
-	def __init__(self, size, fwhm, beta=4.765):
+	def __init__(self, size, alpha = 1, beta=4.765, psf = None):
 		self.size = size
-		self.fwhm = fwhm
+		self.mx = (size - 1) / 2.0
+		self.my = (size - 1) / 2.0
+		
+		if psf is not None:
+			alpha, beta = self.fit(psf)
+		
+		self.set(alpha, beta)
+
+	def fit(self, psf):
+		def moffat2d(xy, alpha, beta, mag, shift):
+			x, y = xy
+			r2 = (x - self.mx) ** 2 + (y - self.my) ** 2
+			return shift + mag * (1 + (r2 / (alpha * alpha))) ** -beta
+
+		cv2t.imshow("src", normalize(psf ** 0.4))
+
+		x0 = np.arange(self.size)
+		y0 = np.arange(self.size)
+		y, x = np.meshgrid(y0, x0)
+		yx = (y.ravel(), x.ravel())
+		z = psf.ravel()
+
+		shift = np.amin(psf)
+		mag = np.amax(z) - shift
+		
+		popt, pcov = curve_fit(moffat2d, yx, z, p0 = [1, 4.765, mag, shift], bounds = ([0, 0, 0, 0], [np.inf, np.inf, np.inf, np.inf]))
+		print (popt)
+		return popt[0], popt[1]
+
+
+
+	def set(self, alpha, beta):
+		self.alpha = alpha
 		self.beta = beta
 		
-		hwhm = fwhm / 2.0
-		alpha = hwhm * (2.0 ** (1.0 / beta) - 1)**0.5
+		r2 = np.array([[((x - self.mx) **2 + (y - self.my)**2) for x in range(self.size) ] for y in range(self.size) ], dtype=np.float)
 		
-		r = np.array([[((x - (size - 1) / 2.0) **2 + (y - (size - 1) / 2.0)**2)**0.5 for x in range(size) ] for y in range(size) ], dtype=np.float)
-		
-		self.psf = (1 + (r/alpha)**2) ** -beta
+		self.psf = (1 + r2 / (alpha * alpha)) ** -beta
+
+		cv2t.imshow("moffat", normalize(self.psf ** 0.4))
+	
 		self.psf /= self.psf.sum()
 		
-		
+	def interpolate(self, s):
+		if s < 0.01:
+			s = 0.01
+		return PsfMoffat(self.size, self.alpha * s ** 0.5, self.beta)
 	
 	def apply(self, img, flip = False):
 		return cv2.filter2D(img, -1, self.psf)
 
 class Psf:
+	def set(self, psf):
+		psf /= psf.sum()
+		self.psf = psf
+		self.psf_flip = self.psf[::-1, ::-1]
+		self.updated = False
+		self.center = (0.0, 0.0)
+		
+
 	def extract(self, img, ptlist, psf_filter_sigma):
 		psflist = get_psf_list(img, ptlist)
 		self.from_psflist(psflist, psf_filter_sigma)
@@ -425,46 +470,59 @@ class Psf:
 		if len(psflist) == 0:
 			return self.gaussian(None, 1.0)
 			
-			
+		psf_filter_sigma = 2.0
 		psf = rrrl_simple(psflist, PsfGauss(args.diameter * 2 + 1, psf_filter_sigma), 30)
 		#psf = rrrl_simple(psflist, PsfMoffat(args.diameter * 2 + 1, psf_filter_sigma * 2.35482, 4.7), 30)
-		mask, sigma = poly_bg(psf, order = 1, scale = 1, it = 10, get_mask = True)
-		mask = mask[:,:,0]
-		mask = cv2.dilate(mask, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9,9)))
-		mask[np.where(psf > np.amax(psf) / 2.0)] = 0
-		mask = cv2.erode(mask, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7,7)))
+		#mask, sigma = poly_bg(psf, order = 1, scale = 1, it = 10, get_mask = True)
+		#mask = mask[:,:,0]
+		#mask = cv2.dilate(mask, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9,9)))
+		#mask[np.where(psf >= np.amax(psf) * 0.9)] = 0
+		#mask = cv2.erode(mask, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7,7)))
+		
+		floodmask = np.zeros((psf.shape[0] + 2, psf.shape[1] + 2), dtype=np.uint8)
+		minVal, maxVal, minLoc, maxLoc = cv2.minMaxLoc(psf)
+		cv2.floodFill(psf, floodmask, maxLoc, 2, loDiff = 1000.0, upDiff = 0.0, flags = 256 + 4 + cv2.FLOODFILL_MASK_ONLY)
+		mask = np.zeros_like(floodmask)
+		mask[1:-1, 1:-1] = floodmask[1:-1, 1:-1]
+		
 		
 		floodmask = np.zeros((mask.shape[0] + 2, mask.shape[1] + 2), dtype=np.uint8)
-		minVal, maxVal, minLoc, maxLoc = cv2.minMaxLoc(psf)
-		print(floodmask.shape, mask.shape)
-		cv2.floodFill(mask, floodmask, maxLoc, 2)
-		print(mask)
+		cv2.floodFill(mask, floodmask, (0, 0), 2, loDiff = 0, upDiff = 0, flags = 256 + 4 + cv2.FLOODFILL_MASK_ONLY)
+		mask = floodmask[2:-2, 2:-2]
+		cv2t.imshow("mask" , normalize(mask))
 		
-		
-		psf -= np.median(psf[np.where(mask != 2)])
-		psf[np.where(mask != 2)] = 0
+		psf -= np.median(psf[np.where(mask != 0)])
+		psf[np.where(mask != 0)] = 0
 		psf[np.where(psf < 0)] = 0
 		if psf.sum() == 0:
 			psf[args.diameter, args.diameter] += 1
 			
-		moffat = PsfMoffat(args.diameter * 2 + 1, 2.35482 * 2, 2)
-		psf = moffat.apply(psf)
-		psf /= psf.sum()
-		self.psf = psf
-		self.psf_flip = self.psf[::-1, ::-1]
-		self.updated = False
+			
+		self.set(cv2.GaussianBlur(psf, (args.diameter * 2 + 1, args.diameter * 2 + 1), 1.2))
+		#self.set(psf)
+		self.base_psf = psf
+		
+		res_psf = rrrl_simple(psflist, self, 30)
+		
+		self.moffat = PsfMoffat(args.diameter * 2 + 1, psf = res_psf)
+		psf = self.moffat.apply(psf)
+		
+		self.set(psf)
 		#cv2t.imshow("psf%d" % id(self) , normalize(self.psf ** 0.5))
-		self.center = (0.0, 0.0) #sym_center(psf)
+	
+	def interpolate(self, s):
+		#moffat = self.moffat #.interpolate(s)
+		#psf = moffat.apply(self.base_psf) * s + self.base_psf * (1.0 - s)
+		moffat = self.moffat.interpolate(s)
+		psf = moffat.apply(self.base_psf)
+		self.set(psf)
+		cv2t.imshow("moffat", normalize(self.psf ** 0.4))
 	
 	def gaussian(self, img, sigma):
 		psf = np.zeros((args.diameter * 2 + 1, args.diameter * 2 + 1), dtype=np.float64)
 		psf[args.diameter, args.diameter] = 1
 		psf = cv2.GaussianBlur(psf, (args.diameter * 2 + 1, args.diameter * 2 + 1), sigma)
-		psf /= psf.sum()
-		self.psf = psf
-		self.psf_flip = self.psf[::-1, ::-1]
-		self.updated = False
-		self.center = (0.0, 0.0)
+		self.set(psf)
 
 	def update(self, cor_psf, dat, res):
 		if not self.updated:
@@ -674,6 +732,11 @@ class TilePsf:
 			t_mask = cv2.blur(t_mask, (self.tile_overlap - 1, self.tile_overlap - 1))
 			t_dat *= t_mask
 			psf.update(t_cor_psf, t_dat, t_res)
+	
+	def interpolate(self, s):
+		for psf, ul, lr, eul, elr in self.tiles:
+			psf.interpolate(s)
+	
 
 def testPsf(shape, psf):
 	test = np.zeros(shape, dtype = np.float64)
@@ -1136,13 +1199,13 @@ reg_prev = [None] * outchannels
 kappa = 10.0
 
 
-def step0(c, lock):
+def step1(c, lock):
 	print("start0  %d" % c)
 	psf[c] = TilePsf()
 	psfs = np.array(psfsrc[c], dtype = np.float32) / psfsrc_white[c]
 	if args.gaussian == 0.0:
 		c_ptlists[c] = set_psf_level(psfs, ptlist)
-		psf[c].extract(psfs, c_ptlists[c], 0.01)
+		psf[c].extract(psfs, c_ptlists[c], args.psf_filter_sigma)
 	else:
 		psf[c].gaussian(psfs, args.gaussian)
 
@@ -1152,7 +1215,7 @@ def step0(c, lock):
 	#c_over_w = np.clip(1.0  -src[c] ** 5, 0.01, 1.0)
 	#over_w[c] = np.array(c_over_w, dtype=np.float32)
 	#print "check c_over_w", np.isnan(c_over_w).any(), cv2.minMaxLoc(c_over_w)
-pfor.pfor(step0, list(range(0, col)))
+pfor.pfor(step1, list(range(0, col)))
 
 for c in range(0, outchannels):
 	res[c] = s_res
@@ -1173,21 +1236,8 @@ for i in range(0, it):
 
 	print(i)
 	
-	if i == 0 or (i % 5 == 0 and args.psf_filter_sigma_start != args.psf_filter_sigma):
-		filter_sigma = float(it - i) / it * (args.psf_filter_sigma_start - args.psf_filter_sigma) + args.psf_filter_sigma
-		print("filter_sigma", filter_sigma)
-	
-		def step1(c, lock):
-			print("start1 %d %d" %(i,c))
-			psfs = np.array(psfsrc[c], dtype = np.float32) / psfsrc_white[c]
-		
-			psf[c].extract(psfs, c_ptlists[c], filter_sigma)
-		
-		
-			print("end1 %d %d" %(i,c))
-	
-		pfor.pfor(step1, list(range(0, col)))
-
+	for c in range(0, col):
+		psf[c].interpolate(float(i) / it)
 
 	s_res = np.mean(res, axis = 0)
 	print("check s_res", np.isnan(s_res).any(), cv2.minMaxLoc(s_res))
@@ -1326,7 +1376,7 @@ for i in range(0, it):
 	reg1.step1(res, args.reg_lambda * norm_w)
 	#reg2 = reg_pm_4(size = 1)
 	#reg2.step1(res, args.reg_lambda * norm_w)
-	reg2 = reg_pyr(depth = 3)
+	reg2 = reg_pyr(depth = 2)
 	reg2.step1(res, args.reg_lambda * norm_w * 2)
 
 	for outc in range(0, outchannels):
