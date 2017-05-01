@@ -784,13 +784,13 @@ class reg_pm_2:
 			grad_y = np.diff(p_res, axis = 0)
 			grad_ym = np.mean([grad_y[:, 0:-1], grad_y[:, 1:]], axis = 0)
 	
-			lap = cv2.GaussianBlur(res, (5,5), 0) - res
+			lap = cv2.GaussianBlur(res, (7,7), 0) - res
 			lap = np.pad(lap, ((1, 1), (1, 1)), 'edge')
 			lap = np.mean([lap[:-1,:-1], lap[:-1,1:], lap[1:,:-1], lap[1:,1:]], axis = 0)
 			lap[np.where(lap > 0)] = 0
 			
 			
-			g.append( grad_xm ** 2 + grad_ym ** 2 + lap ** 2)
+			g.append( grad_xm ** 2 + grad_ym ** 2 + lap ** 2 * 2)
 		g = np.mean(g, axis = 0)
 
 		##g /= l ** 2
@@ -875,55 +875,11 @@ class reg_pm_4:
 		reg = - self.laplacian(lap)
 		return reg
 
-class reg_pm_2_pyr:
+class Pyramid(object):
 	def __init__(self, depth = 3):
 		self.depth = depth
-	
-	def gaussian_pyr(self, img):
-		gp = [img]
-		for i in range(self.depth - 1):
-			print(img.shape)
-			try:
-				img = cv2.pyrDown(img)
-			except:
-				pass
-			gp.append(img)
-		return gp
-
-	def step1(self, res_a, l):
-		
-		l = self.gaussian_pyr(l)
-	
-		gp = []
-		for res in res_a:
-			gp.append(self.gaussian_pyr(res))
-		
-		self.levels = []
-		for img, ll in zip(zip(*gp), l):
-			pm = reg_pm_2()
-			pm.step1(img, ll)
-			self.levels.append(pm)
-	
-	def step2(self, c):
-		gp = self.gaussian_pyr(c)
-		resp = []
-		for pm, img in zip(self.levels, gp):
-			print(pm.gx.shape, img.shape)
-			resp.append(pm.step2(img))
-		
-		up = resp[self.depth - 1]
-		for i in range(self.depth - 2, -1, -1):
-			size = (resp[i].shape[1], resp[i].shape[0])
-			up = cv2.pyrUp(up, dstsize = size)
-			up = up + resp[i]
-		return up
-		
 
 
-class reg_pyr:
-	def __init__(self, depth = 3):
-		self.depth = depth
-	
 	def gaussian_pyr(self, img):
 		gp = [img]
 		for i in range(self.depth):
@@ -937,8 +893,11 @@ class reg_pyr:
 	def gaussian_pyr_er(self, img):
 		gp = [img]
 		for i in range(self.depth):
-			img = cv2.erode(img, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7,7)))
-			img = cv2.pyrDown(img)
+			try:
+				img = cv2.erode(img, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7,7)))
+				img = cv2.pyrDown(img)
+			except:
+				pass
 			gp.append(img)
 		return gp
 
@@ -953,15 +912,68 @@ class reg_pyr:
 			up = cv2.pyrUp(gp[i], dstsize = size)
 			lap = cv2.subtract(up, gp[i-1])
 			lp.append(lap)
-		return lp
+		return lp[::-1]
+
+	def laplacian_pyr_er(self, img):
+		gp = self.gaussian_pyr_er(img)
+		
+		lp = []
+		for i in range(self.depth,0,-1):
+			size = (gp[i - 1].shape[1], gp[i - 1].shape[0])
+			up = cv2.pyrUp(gp[i], dstsize = size)
+			lap = cv2.subtract(up, gp[i-1])
+			lp.append(lap)
+		return lp[::-1]
+	
+	def collapse(self, pyr):
+		up = pyr[self.depth - 1]
+		for i in range(self.depth - 2, -1, -1):
+			size = (pyr[i].shape[1], pyr[i].shape[0])
+			up = cv2.pyrUp(up, dstsize = size)
+			up = up + pyr[i]
+		return up
+		
+
+class reg_pm_2_pyr(Pyramid):
+	def __init__(self, depth = 3):
+		super(reg_pm_2_pyr, self).__init__(depth)
+	
+	def step1(self, res_a, l):
+		
+		l = self.gaussian_pyr(l)
+	
+		gp = []
+		for res in res_a:
+			gp.append(self.gaussian_pyr_er(res))
+		
+		self.levels = []
+		for img, ll in zip(zip(*gp), l):
+			pm = reg_pm_2()
+			pm.step1(img, ll)
+			self.levels.append(pm)
+	
+	def step2(self, c):
+		gp = self.gaussian_pyr_er(c)
+		resp = []
+		for pm, img in zip(self.levels, gp):
+			print(pm.gx.shape, img.shape)
+			resp.append(pm.step2(img))
+		
+		
+		return self.collapse(resp)
+		
 
 
+class reg_pyr(Pyramid):
+	def __init__(self, depth = 3):
+		super(reg_pyr, self).__init__(depth)
+	
 	def step1(self, res_a, l):
 		l = self.gaussian_pyr(l)
 		
 		lps = []
 		for res in res_a:
-			lps.append(self.laplacian_pyr(res))
+			lps.append(self.laplacian_pyr_er(res))
 			
 		self.g_lp = []
 		for i in range(self.depth):
@@ -974,7 +986,7 @@ class reg_pyr:
 			
 			g = np.mean(g, axis = 0)
 			m = mean_clip(g)
-			lm = (l[self.depth - i - 1] ** 2) * m 
+			lm = (l[i] ** 2) * m 
 
 			g = 1. / (1. + (g / lm) ** 0.5)
 			#if i == self.depth - 1:
@@ -989,47 +1001,16 @@ class reg_pyr:
 		for i, g in enumerate(self.g_lp):
 			cv2t.imshow("g_pyr_%d" % i, g)
 
-	def step1b(self, res_a, l):
-		g = []
-		for res in res_a:
-			g.append(cv2.Laplacian(res, -1, ksize = 3, ) ** 2)
-			
-		g = np.mean(g, axis = 0)
-		l = l ** 2 * mean_clip(g)
-
-
-		#g = l ** 2 / ((g ** 0.5 + l) * (g ** 0.5 + l / 10))
-		g = 1. / (1. + (g / l))
-		g = cv2.medianBlur(g, 3)
-		g = cv2.erode(g, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3,3)))
-		g = cv2.GaussianBlur(g, (3,3), 0)
-
-		#g = cv2.dilate(g, cv2.getStructuringElement(cv2.MORPH_CROSS, (3,3)))
-		
-		gp = self.gaussian_pyr_er(g)[:-1][::-1]
-		
-		for i, g in enumerate(gp):
-			cv2t.imshow("g_pyr_%d" % i, normalize(g))
-		self.g_lp = gp
-
 	def step2(self, c):
-		lp = self.laplacian_pyr(c)
+		lp = self.laplacian_pyr_er(c)
 		reg_lp = []
 		for i in range(self.depth):
 			lp[i] *= self.g_lp[i]
 			reg_lp.append(lp[i] - cv2.GaussianBlur(lp[i], (3,3), 0))
 			#-cv2.Laplacian(lp[i], -1, ksize = 3))
 		
-		size = (reg_lp[1].shape[1], reg_lp[1].shape[0])
-		up = cv2.pyrUp(reg_lp[0], dstsize = size)
-		for i in range(1, self.depth - 1):
-			size = (reg_lp[i + 1].shape[1], reg_lp[i + 1].shape[0])
-			up = cv2.pyrUp(up + reg_lp[i], dstsize = size)
-		up = up + reg_lp[self.depth - 1]
 		
-		return up
-
-
+		return self.collapse(reg_lp)
 
 
 
@@ -1376,7 +1357,7 @@ for i in range(0, it):
 	reg1.step1(res, args.reg_lambda * norm_w)
 	#reg2 = reg_pm_4(size = 1)
 	#reg2.step1(res, args.reg_lambda * norm_w)
-	reg2 = reg_pyr(depth = 2)
+	reg2 = reg_pyr(depth = 3)
 	reg2.step1(res, args.reg_lambda * norm_w * 2)
 
 	for outc in range(0, outchannels):
@@ -1390,7 +1371,7 @@ for i in range(0, it):
 	
 	
 		#reg_weight = args.reg * min(float(i) / (it * 0.3), 1)
-		reg = reg1.step2(res[outc]) + reg2.step2(res[outc]) * 2
+		reg = reg1.step2(res[outc]) + reg2.step2(res[outc]) * 2 
 		print("check reg1", np.isnan(reg).any(), cv2.minMaxLoc(reg))
 		reg = reg * args.reg
 		#print("check reg2", np.isnan(reg).any(), cv2.minMaxLoc(reg))
