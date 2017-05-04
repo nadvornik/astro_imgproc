@@ -325,12 +325,11 @@ def rl_simple(src, psf, it):
 
 
 def rrrl_simple(src, psf, it):
-	kappa = 10
-	psf_zero = 0.0002
+	psf_zero = 0.001
 	scales = np.ones((len(src),), dtype=np.float64)
 	weights = np.ones((len(src),), dtype=np.float64)
 	for i in range(len(src)):
-		bl = cv2.GaussianBlur(src[i],(7, 7),0)
+		bl = cv2.GaussianBlur(cv2.medianBlur(src[i], 5), (7, 7), 0)
 		minVal, maxVal, minLoc, maxLoc = cv2.minMaxLoc(bl)
 		
 		src[i] -= minVal - psf_zero
@@ -346,6 +345,7 @@ def rrrl_simple(src, psf, it):
 	
 	
 	for i in range(0, it):
+		kappa = (it - i) / it * 10 + 2
 		b_res = psf.apply(res)
 		b_res[np.where(b_res < 0.0000001)] = 0.0000001
 		
@@ -364,7 +364,7 @@ def rrrl_simple(src, psf, it):
 		clip = np.where(dat > (var * kappa**2)[None, :, :])
 		
 		
-		dat = (dat + 100.0**4) ** -0.25 * weights[:, None, None]
+		dat = (dat + 1000.0**4) ** -0.25 * weights[:, None, None]
 		
 		dat[clip] = 0.0
 		
@@ -483,8 +483,8 @@ class Psf:
 		#mask = cv2.erode(mask, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7,7)))
 		
 		floodmask = np.zeros((psf.shape[0] + 2, psf.shape[1] + 2), dtype=np.uint8)
-		minVal, maxVal, minLoc, maxLoc = cv2.minMaxLoc(psf)
-		cv2.floodFill(psf, floodmask, maxLoc, 2, loDiff = 1000.0, upDiff = 0.0, flags = 256 + 4 + cv2.FLOODFILL_MASK_ONLY)
+		minVal, maxVal, minLoc, maxLoc = cv2.minMaxLoc(cv2.medianBlur(psf, 3))
+		cv2.floodFill(psf, floodmask, maxLoc, 2, loDiff = 1000.0, upDiff = 0.0, flags = 256 + 8 + cv2.FLOODFILL_MASK_ONLY)
 		mask = np.zeros_like(floodmask)
 		mask[1:-1, 1:-1] = floodmask[1:-1, 1:-1]
 		
@@ -1256,7 +1256,7 @@ for i in range(0, it):
 		scaled_src = (np.array(src[c], dtype=np.float32) * scales[c] + 1024.0 * (1.0 - scales[c])) / src_white[c]
 
 		weight = np.empty_like(src[c], dtype=np.float32)
-		weight[:, :] = weights[c]
+		weight[:, :] = weights[c] / scales[c]
 		
 		w2 = cv2.blur(weight, (100, 100)) / src_white[c]
 		w2 *= w2
@@ -1376,7 +1376,7 @@ for i in range(0, it):
 	
 	
 		#reg_weight = args.reg * min(float(i) / (it * 0.3), 1)
-		reg = reg1.step2(res[outc]) * 0 + reg2.step2(res[outc]) * 2 
+		reg = reg1.step2(res[outc]) + reg2.step2(res[outc]) * 2 
 		print("check reg1", np.isnan(reg).any(), cv2.minMaxLoc(reg))
 		reg = reg * args.reg
 		#print("check reg2", np.isnan(reg).any(), cv2.minMaxLoc(reg))
