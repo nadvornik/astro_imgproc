@@ -103,10 +103,10 @@ def debayer(img, filt = False):
 #	return res
 
 
-def hp_filt(img, size = 5):
-	print(img.shape)
+def hp_filt_bayer(img, size = 9):
 	#col = cv2.cvtColor(img, cv2.COLOR_BAYER_BG2RGB)
 	col = debayer(img)
+	col = np.array(col, dtype=np.float32)
 	
 	col = cv2.GaussianBlur(col, (size, size), 0)
 	
@@ -116,6 +116,22 @@ def hp_filt(img, size = 5):
 	sub[0::2, 1::2] = col[0::2, 1::2, 1]
 	sub[1::2, 0::2] = col[1::2, 0::2, 1]
 	res = cv2.subtract(img, sub, dtype=cv2.CV_32FC1)
+	return res
+
+def hp_filt_rgb(img, size = 9):
+	#col = cv2.cvtColor(img, cv2.COLOR_BAYER_BG2RGB)
+
+	r_bl = cv2.GaussianBlur(img[0::2, 0::2], (size, size), 0)
+	b_bl = cv2.GaussianBlur(img[1::2, 1::2], (size, size), 0)
+	
+	g_bl = (cv2.GaussianBlur(img[0::2, 1::2], (size, size), 0) + cv2.GaussianBlur(img[1::2, 0::2], (size, size), 0)) / 2.0
+	
+	res = [
+		cv2.GaussianBlur(img[0::2, 0::2] - r_bl, (3,3), 0),
+		(img[0::2, 1::2] + img[1::2, 0::2]) / 2.0 - g_bl,
+		cv2.GaussianBlur(img[1::2, 1::2] - b_bl, (3,3), 0)
+		]
+	
 	return res
 
 

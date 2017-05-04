@@ -13,14 +13,14 @@ import cv2
 import tifffile
 import argparse
 import sys
-from astro_utils import rawread, normalize, debayer, hp_filt, poly_bg, fit_images, combine_images
+from astro_utils import rawread, normalize, debayer, hp_filt_bayer, hp_filt_rgb, poly_bg, fit_images, combine_images
 
 
-def apply_flat(img, flats, exps):
-	flat = np.ones(img.shape, dtype=np.float32)
+def apply_flat(img, flats, coefs):
+	flat = np.zeros(img.shape, dtype=np.float32)
 	for i, f in enumerate(flats):
 		f = np.array(f, dtype=np.float32)
-		flat *= f ** exps[i]
+		flat += f * coefs[i]
 			
 	flat_bl_b = cv2.blur(flat[0::2, 0::2], (100, 100))
 	flat_bl_r = cv2.blur(flat[1::2, 1::2], (100, 100))
@@ -116,11 +116,11 @@ if minval is None:
 print("min: %d, max:%d" % (minval, maxval))
 	
 #print img
-img_hp = hp_filt(img)
+img_hp = hp_filt_bayer(img)
 
 dark_hp = []
 for d in dark:
-	dark_hp.append(hp_filt(d))
+	dark_hp.append(hp_filt_bayer(d))
 
 if len(dark) > 0:
 	coefs, n = fit_images(dark_hp, img_hp, 10)
@@ -147,31 +147,33 @@ if args.flat:
 		flat.append(f)
 
 if len(flat) > 0:
-	l_f = []
+#	img_hp = hp_filt_rgb(np.array(img, dtype=np.uint16))
+
+#	flat_hp = [[], [], []]
+#	for f in flat:
+#		flat_hp_rgb = hp_filt_rgb(f)
+#		for c in range(0,3):
+#			flat_hp[c].append(flat_hp_rgb[c])
+
+#	coefs = np.zeros((len(flat),))
+#	for c in range(0,3):
+#		print("fit", c)
+#		coefs_c, n = fit_images(flat_hp[c], img_hp[c], 10, kappa = 3)
+#		coefs += coefs_c / coefs_c.sum()
+
+	img_hp = cv2.pyrDown(img)
+	img_hp -= cv2.GaussianBlur(img_hp, (15,15), 0) * 0.9
+	flat_hp = []
 	for f in flat:
-		l_f.append(cv2.log(np.array(f, dtype=np.float64)))
-		
-	l_img = cv2.log(np.array(img, dtype=np.float64))
-	#l_img = np.array(img, dtype=np.float64)
+		hpf = cv2.pyrDown(np.array(f, dtype = np.float32))
+		hpf -= cv2.GaussianBlur(hpf, (15,15), 0) * 0.9
+		flat_hp.append(hpf)
+	coefs, n = fit_images(flat_hp, img_hp, 10, kappa = 3)
+
+
+	print(coefs)
 	
-	
-	flat_r = np.zeros_like(l_img)
-	flat_r[1::2, 1::2] = 1
-	
-	flat_b = np.zeros_like(l_img)
-	flat_b[0::2, 0::2] = 1
-	
-	flat_g = np.zeros_like(l_img)
-	flat_g[0::2, 1::2] = 1
-	flat_g[1::2, 0::2] = 1
-	
-	flat_rgb = [flat_r, flat_g, flat_b]
-	
-	
-		
-	exps, n = fit_images(l_f + flat_rgb, l_img, 10, kappa_plus = 3)
-	
-	img = apply_flat(img, flat, exps[:-3])
+	img = apply_flat(img, flat, coefs)
 	print(img.shape)
 		
 
@@ -192,16 +194,16 @@ if args.poly_bg > 0:
 		
 	for i in range(len(bg_img)):
 		df = np.array(bg_img[i], dtype=np.float32)
-		df = cv2.blur(df, (100,100))
-		df = cv2.blur(df, (100,100))
-		df = cv2.blur(df, (100,100))
+		df = cv2.blur(df, (50,50))
+		df = cv2.blur(df, (50,50))
+		df = cv2.blur(df, (50,50))
 		bg_img[i] = df
 	
 	bg = poly_bg(col, order = args.poly_bg, scale = args.scale, erode = args.erode, it = args.iter, darkframes = bg_img)
 	bg -= args.zero
 	col = cv2.subtract(col, bg, dtype = cv2.CV_16UC3)
 else:
-	col = cv2.add(col, args.zero, dtype = cv2.CV_16UC3)
+	col = cv2.add(col, (args.zero, args.zero, args.zero, 0), dtype = cv2.CV_16UC3)
 
 if args.outfile is not None:
 	tifffile.imsave(args.outfile, col)
