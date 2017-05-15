@@ -60,15 +60,15 @@ parser.add_argument("--update-iter", type=int, default=1000,
 parser.add_argument("--update-accel", type=float, default=20,
                     help="update accel")
 
-parser.add_argument("--reg", type=float, default=1,
-                    help="regularization")
-parser.add_argument("--reg-plus", type=float, default=1,
-                    help="regularization plus")
+parser.add_argument("--reg2", type=float, default=[0.1], nargs = '+',
+                    help="regularization2")
+parser.add_argument("--reg-lambda2", type=float, default=[2.0], nargs = '+',
+                    help="lambda2")
+parser.add_argument("--reg4", type=float, default=[0.1], nargs = '+',
+                    help="regularization4")
+parser.add_argument("--reg-lambda4", type=float, default=[2.0], nargs = '+',
+                    help="lambda4")
 
-parser.add_argument("--reg-lambda", type=float, default=2,
-                    help="lambda")
-parser.add_argument("--reg-starprot", type=float, default=100,
-                    help="starprot")
 
 parser.add_argument("--robustness", type=float, default=1000,
                     help="robustness")
@@ -85,6 +85,15 @@ parser.add_argument("--scale", type=float, default=1,
 
 
 args = parser.parse_args()
+
+while len(args.reg2) < len(args.reg_lambda2):
+	args.reg2.append(args.reg2[-1])
+while len(args.reg_lambda2) < len(args.reg2):
+	args.reg_lambda2.append(args.reg_lambda2[-1])
+while len(args.reg4) < len(args.reg_lambda4):
+	args.reg4.append(args.reg4[-1])
+while len(args.reg_lambda4) < len(args.reg4):
+	args.reg_lambda4.append(args.reg_lambda4[-1])
 
 
 def normalize(img):
@@ -358,7 +367,7 @@ def rrrl_simple(src, psf, it):
 		minVal, maxVal, minLoc, maxLoc = cv2.minMaxLoc(bl)
 		
 		src[i] -= minVal - psf_zero
-		scales[i] = 1 / (maxVal + 0.00000000001 - minVal)
+		scales[i] = 1 / (maxVal + 0.00000000001 - minVal) ** 0.5
 		weights[i] = maxVal - minVal
 		
 		
@@ -483,6 +492,8 @@ class PsfMoffat:
 
 class Psf:
 	def set(self, psf):
+		psf = np.array(psf)
+		psf[np.where(psf < 0)] = 0
 		psf /= psf.sum()
 		self.psf = psf
 		self.psf_flip = self.psf[::-1, ::-1]
@@ -499,7 +510,9 @@ class Psf:
 			return self.gaussian(None, 1.0)
 			
 		psf_filter_sigma = 2.0
-		psf = rrrl_simple(psflist, PsfGauss(args.diameter * 2 + 1, psf_filter_sigma), 30)
+		#psf = rrrl_simple(psflist, PsfMoffat(args.diameter * 2 + 1, 3, 2), 30)
+		psf = rrrl_simple(psflist, PsfGauss(args.diameter * 2 + 1, psf_filter_sigma), 100)
+		
 		#psf = rrrl_simple(psflist, PsfMoffat(args.diameter * 2 + 1, psf_filter_sigma * 2.35482, 4.7), 30)
 		#mask, sigma = poly_bg(psf, order = 1, scale = 1, it = 10, get_mask = True)
 		#mask = mask[:,:,0]
@@ -508,25 +521,39 @@ class Psf:
 		#mask = cv2.erode(mask, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7,7)))
 		
 		floodmask = np.zeros((psf.shape[0] + 2, psf.shape[1] + 2), dtype=np.uint8)
-		minVal, maxVal, minLoc, maxLoc = cv2.minMaxLoc(cv2.medianBlur(psf, 3))
-		cv2.floodFill(psf, floodmask, maxLoc, 2, loDiff = 1000.0, upDiff = 0.0, flags = 256 + 8 + cv2.FLOODFILL_MASK_ONLY)
-		mask = np.zeros_like(floodmask)
-		mask[1:-1, 1:-1] = floodmask[1:-1, 1:-1]
+		bl_psf = cv2.medianBlur(psf, 3)
+		bl_psf = cv2.GaussianBlur(bl_psf, (3, 3), 0)
 		
+		y, x = np.ogrid[-args.diameter:args.diameter + 1, -args.diameter:args.diameter + 1]
+		r = np.array((x * x + y * y) ** 0.5 / args.diameter, dtype = np.float32) ** 2
 		
-		floodmask = np.zeros((mask.shape[0] + 2, mask.shape[1] + 2), dtype=np.uint8)
-		cv2.floodFill(mask, floodmask, (0, 0), 2, loDiff = 0, upDiff = 0, flags = 256 + 4 + cv2.FLOODFILL_MASK_ONLY)
-		mask = floodmask[2:-2, 2:-2]
-		mask[0,:] = 1
-		mask[-1,:] = 1
-		mask[:, 0] = 1
-		mask[:, -1] = 1
+		minVal, maxVal, minLoc, maxLoc = cv2.minMaxLoc(bl_psf)
+		
+		bl_psf_r = bl_psf + r * (maxVal - minVal)
+		thr = (maxVal - minVal) / 2.0 + minVal
+		
+		while True:
+			cv2.floodFill(bl_psf_r, floodmask, maxLoc, 2, loDiff = 1000.0, upDiff = 0, flags = 256 + 8 + cv2.FLOODFILL_MASK_ONLY)
+			mask = floodmask[1:-1, 1:-1]
+			bl_psf[np.where(mask > 0)] = 0
+			minVal, maxVal, minLoc, maxLoc = cv2.minMaxLoc(bl_psf)
+			if maxVal < thr:
+				break
+		
+		mask[0,:] = 0
+		mask[-1,:] = 0
+		mask[:, 0] = 0
+		mask[:, -1] = 0
 		
 		cv2t.imshow("mask" , normalize(mask))
 		cv2t.imshow("psf1" , normalize(psf ** 0.4))
 		
-		psf -= np.mean(psf[np.where(mask != 0)])
-		psf[np.where(mask != 0)] = 0
+		border = cv2.dilate(mask, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3,3))) - mask
+		
+		cv2t.imshow("border" , normalize(border))
+
+		psf -= np.mean(psf[np.where(border != 0)])
+		psf[np.where(mask == 0)] = 0
 		psf[np.where(psf < 0)] = 0
 		if psf.sum() == 0:
 			psf[args.diameter, args.diameter] += 1
@@ -537,7 +564,7 @@ class Psf:
 		#self.set(psf)
 		self.base_psf = psf
 		
-		res_psf = rrrl_simple(psflist, self, 30)
+		res_psf = rrrl_simple(psflist, self, 100)
 		
 		self.moffat = PsfMoffat(args.diameter * 2 + 1, psf = res_psf)
 		psf = self.moffat.apply(psf)
@@ -546,10 +573,12 @@ class Psf:
 		#cv2t.imshow("psf%d" % id(self) , normalize(self.psf ** 0.5))
 	
 	def interpolate(self, s):
-		#moffat = self.moffat #.interpolate(s)
-		#psf = moffat.apply(self.base_psf) * s + self.base_psf * (1.0 - s)
-		moffat = self.moffat.interpolate(s)
-		psf = moffat.apply(self.base_psf)
+		moffat = self.moffat
+		s = 1.0 - np.clip(s, 0, 1)
+		moffat_i = self.moffat.interpolate(s)
+		psf = moffat.apply(self.base_psf) + self.base_psf - moffat_i.apply(self.base_psf)
+		#moffat = self.moffat.interpolate(s)
+		#psf = moffat.apply(self.base_psf)
 		self.set(psf)
 		cv2t.imshow("moffat", normalize(self.psf ** 0.4))
 	
@@ -703,7 +732,7 @@ class TilePsf:
 					elr = (min(y + tile_size_h + tile_overlap_e, h), min(x + tile_size_w + tile_overlap_e, w))
 				
 					t_ptlist = [ (py - eul[0], px - eul[1], v, hfr, mask, low) for py, px, v, hfr, mask, low in ptlist if py >= eul[0] and px >= eul[1] and py < elr[0] and px < elr[1] ]
-					if len(t_ptlist) > 10:
+					if len(t_ptlist) > 20:
 						break
 					if eul == (0,0) and elr == (h,w):
 						break
@@ -845,7 +874,7 @@ class reg_pm_2:
 		#g = l ** 2 / ((g ** 0.5 + l) * (g ** 0.5 + l / 10))
 		
 		l = l ** 2 * mean_clip(g)
-		g = 1. / (1. + (g / l))
+		g = 1. / (1. + (g / l) ** 0.5)
 		#g = cv2.GaussianBlur(g, (3,3), 0)
 		
 		cv2t.imshow("g2_%d" % g.shape[1], normalize(g))
@@ -914,7 +943,15 @@ class reg_pm_4:
 		return reg
 
 class Pyramid(object):
-	def __init__(self, depth = 3):
+	def __init__(self, depth = 3, reg = None, l = None):
+		if reg is not None:
+			depth = len(reg)
+			self.l_mul = l
+			self.reg = reg
+		else:
+			self.l_mul = [1.0] * depth
+			self.reg = [1.0] * depth
+		
 		self.depth = depth
 
 
@@ -928,20 +965,6 @@ class Pyramid(object):
 			gp.append(img)
 		return gp
 
-	def gaussian_pyr_er(self, img):
-		gp = [img]
-		for i in range(self.depth):
-			try:
-				img = cv2.erode(img, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7,7)))
-				img = cv2.dilate(img, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3,3)))
-				img = cv2.pyrDown(img)
-			except:
-				pass
-			gp.append(img)
-		return gp
-
-
-
 	def laplacian_pyr(self, img):
 		gp = self.gaussian_pyr(img)
 		
@@ -953,6 +976,18 @@ class Pyramid(object):
 			lp.append(lap)
 		return lp[::-1]
 
+	def gaussian_pyr_er(self, img):
+		gp = [img]
+		for i in range(self.depth):
+			try:
+				img = cv2.GaussianBlur(img, (3,3), 0)
+				img = cv2.erode(img, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3,3)))
+				img = cv2.pyrDown(img)
+			except:
+				pass
+			gp.append(img)
+		return gp
+
 	def laplacian_pyr_er(self, img):
 		gp = self.gaussian_pyr_er(img)
 		
@@ -963,19 +998,19 @@ class Pyramid(object):
 			lap = cv2.subtract(up, gp[i-1])
 			lp.append(lap)
 		return lp[::-1]
-	
+
 	def collapse(self, pyr):
-		up = pyr[self.depth - 1]
+		up = pyr[self.depth - 1] * self.reg[self.depth - 1]
 		for i in range(self.depth - 2, -1, -1):
 			size = (pyr[i].shape[1], pyr[i].shape[0])
 			up = cv2.pyrUp(up, dstsize = size)
-			up = up + pyr[i]
+			up = up + pyr[i] * self.reg[i]
 		return up
 		
 
 class reg_pm_2_pyr(Pyramid):
-	def __init__(self, depth = 3):
-		super(reg_pm_2_pyr, self).__init__(depth)
+	def __init__(self, depth = 3, reg = None, l = None):
+		super(reg_pm_2_pyr, self).__init__(depth, reg, l)
 	
 	def step1(self, res_a, l):
 		
@@ -986,9 +1021,9 @@ class reg_pm_2_pyr(Pyramid):
 			gp.append(self.gaussian_pyr_er(res))
 		
 		self.levels = []
-		for img, ll in zip(zip(*gp), l):
+		for img, ll, lm in zip(zip(*gp), l, self.l_mul):
 			pm = reg_pm_2()
-			pm.step1(img, ll)
+			pm.step1(img, ll * lm)
 			self.levels.append(pm)
 	
 	def step2(self, c):
@@ -1004,8 +1039,8 @@ class reg_pm_2_pyr(Pyramid):
 
 
 class reg_pyr(Pyramid):
-	def __init__(self, depth = 3):
-		super(reg_pyr, self).__init__(depth)
+	def __init__(self, depth = 3, reg = None, l = None):
+		super(reg_pyr, self).__init__(depth, reg, l)
 	
 	def step1(self, res_a, l):
 		l = self.gaussian_pyr(l)
@@ -1025,7 +1060,7 @@ class reg_pyr(Pyramid):
 			
 			g = np.mean(g, axis = 0)
 			m = mean_clip(g)
-			lm = (l[i] ** 2) * m 
+			lm = ((l[i] * self.l_mul[i]) ** 2) * m 
 
 			g = 1. / (1. + (g / lm) ** 0.5)
 			#if i == self.depth - 1:
@@ -1205,6 +1240,9 @@ exp_clusters = cluster_exps(exps)
 
 sum_src, sumweights = average_src(src, src_white, weights)
 
+print("sumweights", sumweights)
+print("sum_src", sum_src)
+
 if args.psffile:
 	for f in [args.psffile]:
 		img = tifffile.TiffFile(f).asarray(memmap=True)
@@ -1231,7 +1269,7 @@ else:
 
 col = len(src)
 
-print("sumweights", sumweights)
+
 
 #s_res = cv2.GaussianBlur(sum_src,(5,5),0)
 #s_res = cv2.erode(s_res, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7,7)))
@@ -1339,8 +1377,8 @@ for i in range(0, it):
 	sum_corw = np.zeros_like(res)
 	var_next = np.zeros_like(res)
 
-	reg_weight = 1 + (float(i) / it * args.robustness ** 0.5)**2
-	dat_eps = 1/reg_weight**4
+	#reg_weight = 1 + (float(i) / it * args.robustness ** 0.5)**2
+	dat_eps = 1/args.robustness**4
 	
 	def step2(c, lock):
 		print("start2 %d %d" %(i,c))
@@ -1350,7 +1388,7 @@ for i in range(0, it):
 		scaled_src = (np.array(src[c], dtype=np.float32) * scales[c] + 1024.0 * (1.0 - scales[c])) / src_white[c]
 
 		weight = np.empty_like(src[c], dtype=np.float32)
-		weight[:, :] = weights[c] / scales[c]
+		weight[:, :] = weights[c] / (scales[c] ** np.clip(i / it, 0.0, 0.5))
 		
 		w2 = cv2.blur(weight, (100, 100)) / src_white[c]
 		w2 *= w2
@@ -1359,10 +1397,6 @@ for i in range(0, it):
 		
 		where_over = np.where((src[c] > maxval[c] * 0.8) & (scaled_src < b_res))
 		weight[where_over] /= 1.0 + (src[c][where_over] - maxval[c] * 0.8) / (src_white[c] / 30)
-		
-		if c < 3:
-			cv2t.imshow("w%d" % c, weight)
-
 		
 		scaled_src = (np.array(src[c], dtype=np.float32) * scales[c] + 1024.0 * (1.0 - scales[c])) / src_white[c]
 		scaled_src[np.where(weight == 0)] = 1024.0 / src_white[c]
@@ -1454,12 +1488,12 @@ for i in range(0, it):
 		
 	cv2t.imshow("norm_w", norm_w / 10)
 
-	reg1 = reg_pm_2_pyr(depth = 1)
-	reg1.step1(res, args.reg_lambda * norm_w)
+	reg1 = reg_pm_2_pyr(reg = args.reg2, l = args.reg_lambda2)
+	reg1.step1(res, norm_w)
 	#reg2 = reg_pm_4(size = 1)
 	#reg2.step1(res, args.reg_lambda * norm_w)
-	reg2 = reg_pyr(depth = 1)
-	reg2.step1(res, args.reg_lambda * norm_w * 2)
+	reg2 = reg_pyr(reg = args.reg4, l = args.reg_lambda4)
+	reg2.step1(res, norm_w)
 
 	for outc in range(0, outchannels):
 		var[outc] /= outc_num[outc]
@@ -1472,9 +1506,8 @@ for i in range(0, it):
 	
 	
 		#reg_weight = args.reg * min(float(i) / (it * 0.3), 1)
-		reg = reg1.step2(res[outc]) + reg2.step2(res[outc]) * 2 
+		reg = reg1.step2(res[outc]) + reg2.step2(res[outc])
 		print("check reg1", np.isnan(reg).any(), cv2.minMaxLoc(reg))
-		reg = reg * args.reg
 		#print("check reg2", np.isnan(reg).any(), cv2.minMaxLoc(reg))
 
 		missing = np.where(sum_w[outc] < 1.0)
@@ -1518,8 +1551,6 @@ for i in range(0, it):
 		reg_p[np.where(reg < 0.)] = 0.
 		reg_m = reg - reg_p
 	
-		reg_p *= args.reg_plus
-
 		#res[outc] *= cv2.divide(1 + reg_p, 1 - reg_m)
 
 		#cor = cv2.divide(sum_corw[outc] + reg_p, sum_w[outc] - reg_m)
@@ -1532,6 +1563,12 @@ for i in range(0, it):
 		res[outc] += reg
 
 
+		retval, top = cv2.threshold(res[outc], 0.5,255,cv2.THRESH_TOZERO)
+		top = cv2.dilate(top, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9,9)))
+		top = cv2.erode(top, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (11,11)))
+		res[outc] = np.maximum(res[outc], top)
+
+
 		print("check res", np.isnan(res[outc]).any(), cv2.minMaxLoc(res[outc]))
 
 		print("check reg_p", np.isnan(reg_p).any(), cv2.minMaxLoc(reg_p))
@@ -1541,8 +1578,6 @@ for i in range(0, it):
 		cv2t.imshow("reg_p%d" % outc, normalize(reg_p))
 		cv2t.imshow("reg_m%d" % outc, normalize(-reg_m))
 		cv2t.imshow("res%d" % outc, normalize(np.clip(res[outc] - 1010/65535.0,10/65535.0,1)** 0.1))
-
-		cv2t.imshow("sumw%d" % outc, normalize(sum_w[outc]))
 
 #		if args.gaussian == 0.0:
 #			curhfr = get_hfr(res[outc], ptlist)
