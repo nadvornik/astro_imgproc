@@ -509,7 +509,6 @@ class Psf:
 		if len(psflist) == 0:
 			return self.gaussian(None, 1.0)
 			
-		psf_filter_sigma = 2.0
 		#psf = rrrl_simple(psflist, PsfMoffat(args.diameter * 2 + 1, 3, 2), 30)
 		psf = rrrl_simple(psflist, PsfGauss(args.diameter * 2 + 1, psf_filter_sigma), 100)
 		
@@ -841,24 +840,23 @@ class reg_pm_2:
 		except:
 			pass
 		
-		for res in res_a:
-			p_res = np.pad(res, ((1, 1), (1, 1)), 'edge')
-			
-			#p_res -= cv2.GaussianBlur(p_res, (11,11), 0)
-			
-			grad_x = np.diff(p_res, axis = 1)
-			grad_xm = np.mean([grad_x[0:-1, :], grad_x[1:, :]], axis = 0)
-			grad_y = np.diff(p_res, axis = 0)
-			grad_ym = np.mean([grad_y[:, 0:-1], grad_y[:, 1:]], axis = 0)
+		res = np.mean(res_a, axis = 0)
+		p_res = np.pad(res, ((1, 1), (1, 1)), 'edge')
+		
+		#p_res -= cv2.GaussianBlur(p_res, (11,11), 0)
+		
+		grad_x = np.diff(p_res, axis = 1)
+		grad_xm = np.mean([grad_x[0:-1, :], grad_x[1:, :]], axis = 0)
+		grad_y = np.diff(p_res, axis = 0)
+		grad_ym = np.mean([grad_y[:, 0:-1], grad_y[:, 1:]], axis = 0)
 	
-			lap = cv2.GaussianBlur(res, (7,7), 0) - res
-			lap = np.pad(lap, ((1, 1), (1, 1)), 'edge')
-			lap = np.mean([lap[:-1,:-1], lap[:-1,1:], lap[1:,:-1], lap[1:,1:]], axis = 0)
-			lap[np.where(lap > 0)] = 0
+		lap = cv2.GaussianBlur(res, (7,7), 0) - res
+		lap = np.pad(lap, ((1, 1), (1, 1)), 'edge')
+		lap = np.mean([lap[:-1,:-1], lap[:-1,1:], lap[1:,:-1], lap[1:,1:]], axis = 0)
+		lap[np.where(lap > 0)] = 0
 			
 			
-			g.append( grad_xm ** 2 + grad_ym ** 2 + lap ** 2 * 2)
-		g = np.mean(g, axis = 0)
+		g = grad_xm ** 2 + grad_ym ** 2 + lap ** 2 * 2
 
 		##g /= l ** 2
 		#g = 1 / ( 1 + g ** 0.5) #!
@@ -1046,8 +1044,8 @@ class reg_pyr(Pyramid):
 		l = self.gaussian_pyr(l)
 		
 		lps = []
-		for res in res_a:
-			lps.append(self.laplacian_pyr_er(res))
+		res = np.mean(res_a, axis = 0)
+		lps.append(self.laplacian_pyr_er(res))
 			
 		self.g_lp = []
 		for i in range(self.depth):
@@ -1483,8 +1481,9 @@ for i in range(0, it):
 	
 	var = var_next
 
-	norm_w = np.clip(np.mean(sum_w) / np.mean(sum_w, axis = 0), 1.0, 10.0)
-	norm_w = cv2.dilate(norm_w, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9,9)))
+	norm_w = np.mean(sum_w) / np.mean(sum_w, axis = 0)
+	norm_w = cv2.GaussianBlur(norm_w, (13,13), 0)
+	norm_w = np.clip(norm_w, 1.0, 10.0)
 		
 	cv2t.imshow("norm_w", norm_w / 10)
 
