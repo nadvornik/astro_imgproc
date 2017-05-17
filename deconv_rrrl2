@@ -77,6 +77,9 @@ parser.add_argument("--robustness", type=float, default=1000,
 parser.add_argument("--gaussian", type=float, default=0.0,
                     help="blind with gaussian")
 
+parser.add_argument("--gradient-radius", type=int, default=300,
+                    help="gradient radius")
+
 parser.add_argument("--crop", type=crop_param, default=None,
                     help="crop x1,x2,y1,y2")
 
@@ -1142,6 +1145,7 @@ weights = []
 maxval = []
 
 exps = []
+gradient_weight = []
 
 outmap = []
 
@@ -1167,6 +1171,7 @@ outc = 0
 for f in args.infile:
 	fn = f
 	exp = 1.0
+	grad_weight = 1.0
 	if not os.path.isfile(fn):
 		try:
 			outc, fn = fn.split(':')
@@ -1177,10 +1182,15 @@ for f in args.infile:
 	for fn in fn.split(','):
 		if not os.path.isfile(fn):
 			try:
-				fn, exp = fn.split('@')
-				exp = float(exp)
-			except:
-				pass
+				fn, exp_s, grad_weight_s = fn.split('@')
+				exp = float(exp_s)
+				grad_weight = float(grad_weight_s)
+			except: 
+				try:
+					fn, exp = fn.split('@')
+					exp = float(exp)
+				except:
+					pass
 		if not os.path.isfile(fn):
 			print(fn, "not found")
 			sys.exit(1)
@@ -1223,6 +1233,7 @@ for f in args.infile:
 			outi += 1
 		
 			exps.append(exp)
+			gradient_weight.append(grad_weight)
 		imgidx.append(cidx)
 		transp.append(transp_c)
 
@@ -1386,7 +1397,7 @@ for i in range(0, it):
 		scaled_src = (np.array(src[c], dtype=np.float32) * scales[c] + 1024.0 * (1.0 - scales[c])) / src_white[c]
 
 		weight = np.empty_like(src[c], dtype=np.float32)
-		weight[:, :] = weights[c] / (scales[c] ** np.clip(i / it, 0.0, 0.5))
+		weight[:, :] = weights[c] / (scales[c] ** np.clip(i / it, 0.0, 1))
 		
 		w2 = cv2.blur(weight, (100, 100)) / src_white[c]
 		w2 *= w2
@@ -1402,39 +1413,51 @@ for i in range(0, it):
 		dif = scaled_src - b_res
 		mean_w = 0.0000001 / (0.0000001 + dif * dif) * weight
 
-		dif = dif * mean_w
-		dif = cv2.blur(dif, (500,500))
-		dif = cv2.blur(dif, (500,500))
-		dif = cv2.blur(dif, (500,500))
-		dif = cv2.blur(dif, (500,500))
+		gw = gradient_weight[c]
+		gr = args.gradient_radius
 		
-		mean_w = cv2.blur(mean_w, (500,500))
-		mean_w = cv2.blur(mean_w, (500,500))
-		mean_w = cv2.blur(mean_w, (500,500))
-		mean_w = cv2.blur(mean_w, (500,500))
+		dat = mean_w
 		
-		dif = cv2.divide(dif, mean_w)
+		for ii in range(2):
+			difw = dif * dat
+			difw = cv2.blur(difw, (gr,gr))
+			difw = cv2.blur(difw, (gr,gr))
+			difw = cv2.blur(difw, (gr,gr))
+			difw = cv2.blur(difw, (gr,gr))
+		
+			mean_w = cv2.blur(mean_w, (gr,gr))
+			mean_w = cv2.blur(mean_w, (gr,gr))
+			mean_w = cv2.blur(mean_w, (gr,gr))
+			mean_w = cv2.blur(mean_w, (gr,gr))
+		
+			difw = cv2.divide(difw, mean_w)
 
-		cor = cv2.divide(scaled_src, b_res)
-		cor[np.where(cor < 0.00001)] = 0.00001
-		
-		cor_hp = cv2.divide(scaled_src - dif, b_res)
-		cor_hp[np.where(cor_hp < 0.00001)] = 0.00001
+			src_hp = scaled_src - difw
+			cor_hp = cv2.divide(src_hp, b_res)
+			cor_hp[np.where(cor_hp < 0.00001)] = 0.00001
 			
+		
+			dat = b_res - (src_hp) * (1.0 - np.log(cor_hp))
+			dat = dat * dat
+		
+			
+		
+			if ii == 1:
+				with lock:
+					var_next[outc] += dat
+				clip = np.where(dat > var[outc] * kappa * kappa)
+				dat[clip] = 100000000000000
+		
+			dat = (dat + dat_eps) ** -0.25
+		
+			dat *= weight / src_white[c]
+		
+		
+		cor = cv2.divide(scaled_src - difw * (1.0 - gw), b_res)
+		cor[np.where(cor < 0.00001)] = 0.00001
 		cor_psf = cor
+
 		
-		dat = b_res - (scaled_src - dif) * (1.0 - np.log(cor_hp))
-		dat = dat * dat
-		
-		clip = np.where(dat > var[outc] * kappa * kappa)
-		
-		with lock:
-			var_next[outc] += dat
-		
-		dat = (dat + dat_eps) ** -0.25
-		dat[clip] = 0.01
-		
-		dat *= weight / src_white[c]
 		
 		del b_res
 		
@@ -1443,7 +1466,7 @@ for i in range(0, it):
 		except:
 			cor_mean = 1.0
 		if outc_num[outc] > 1:
-			scales[c] /= cor_mean
+			scales[c] /= cor_mean ** 0.5
 
 		with lock:
 			print("cor mean", cor_mean)
@@ -1470,6 +1493,9 @@ for i in range(0, it):
 		
 		if c < 3:
 			cv2t.imshow("dat%d" % c, normalize(-dat**0.5))
+		
+		if c == 1 or c == 300:
+			cv2t.imshow("dif%d" % c, normalize(difw))
 				
 		if i > args.update_iter:
 			psf[c].update(cor_psf, dat, res[outc])
