@@ -16,6 +16,7 @@ import os
 import argparse
 import pfor
 from cv2t import cv2t
+import gc
 
 from astro_utils import noise_level, poly_bg, poly_res, poly_array,  extrapolate_transp
 from centroid import centroid, sym_center
@@ -57,7 +58,7 @@ parser.add_argument("--psf-filter-sigma", type=float, default=0.5,
 parser.add_argument("--psf-filter-moffat-scale", type=float, default=1,
                     help="psf filter moffat scale")
 
-parser.add_argument("--update-iter", type=int, default=1000,
+parser.add_argument("--update-iter", type=int, default=0,
                     help="start updating at iteration i")
 parser.add_argument("--update-accel", type=float, default=20,
                     help="update accel")
@@ -105,6 +106,18 @@ parser.add_argument("--crop", type=crop_param, default=None,
 
 parser.add_argument("--scale", type=float, default=1,
                     help="output scale")
+
+parser.add_argument("--zero", type=float, default=1024,
+                    help="zero level")
+
+parser.add_argument("--show-gamma", type=float, default=0.1,
+                    help="display gamma")
+
+parser.add_argument("--overexp", type=float, default=0.8,
+                    help="overexp level")
+
+parser.add_argument("--tile-overlap", type=float, default=0.25,
+                    help="tile overlap")
 
 
 args = parser.parse_args()
@@ -595,15 +608,20 @@ class Psf:
 		#cv2t.imshow("psf%d" % id(self) , normalize(self.psf ** 0.5))
 	
 	def interpolate(self, s):
-		moffat = self.moffat
-		s *= args.psf_filter_moffat_scale
-		#s = 1.0 - np.clip(s, 0, 1)
-		#moffat_i = self.moffat.interpolate(s)
-		#psf = moffat.apply(self.base_psf) + self.base_psf - moffat_i.apply(self.base_psf)
-		moffat = self.moffat.interpolate(s)
-		psf = moffat.apply(self.base_psf)
-		self.set(psf)
-		cv2t.imshow("moffat", normalize(self.psf ** 0.4))
+		if self.updated:
+			return
+		try:
+			moffat = self.moffat
+			s *= args.psf_filter_moffat_scale
+			#s = 1.0 - np.clip(s, 0, 1)
+			#moffat_i = self.moffat.interpolate(s)
+			#psf = moffat.apply(self.base_psf) + self.base_psf - moffat_i.apply(self.base_psf)
+			moffat = self.moffat.interpolate(s)
+			psf = moffat.apply(self.base_psf)
+			self.set(psf)
+			cv2t.imshow("moffat", normalize(self.psf ** 0.4))
+		except:
+			pass
 	
 	def gaussian(self, img, sigma):
 		psf = np.zeros((args.diameter * 2 + 1, args.diameter * 2 + 1), dtype=np.float64)
@@ -645,11 +663,20 @@ class Psf:
 		if self.psf.sum() == 0:
 			self.psf[args.diameter, args.diameter] += 1
 
-		self.psf /= self.psf.sum()
+		self.psf = self.psf / self.psf.sum()
 		self.psf_flip = self.psf[::-1, ::-1]
 
 	def apply(self, img, flip = False):
 		return cv2.filter2D(img, -1, (self.psf_flip, self.psf)[flip])
+	
+	def hfr(self):
+		
+		(x, y) = sym_center(self.psf)
+		x += args.diameter
+		y += args.diameter
+		
+		psf = cv2.getRectSubPix(np.float32(self.psf), (args.diameter * 2 + 1, args.diameter * 2 + 1), (x, y))
+		return hfr(psf)
 	
 class VarPsf:
 	def extract(self, img, ptlist, psf_filter_sigma):
@@ -741,7 +768,7 @@ class TilePsf:
 
 		tile_size_h = int((h + args.tiles - 1) / args.tiles)
 		tile_size_w = int((w + args.tiles - 1) / args.tiles)
-		tile_overlap = int(tile_size_h / 4)
+		tile_overlap = int(tile_size_h * args.tile_overlap)
 		self.tile_overlap = tile_overlap
 		
 		self.tiles = []
@@ -781,7 +808,8 @@ class TilePsf:
 
 		tile_size_h = int((h + args.tiles - 1) / args.tiles)
 		tile_size_w = int((w + args.tiles - 1) / args.tiles)
-		tile_overlap = tile_size_h / 4
+		tile_overlap = int(tile_size_h * args.tile_overlap)
+		self.tile_overlap = tile_overlap
 		
 		self.tiles = []
 		for y in range(0, h, tile_size_h):
@@ -826,6 +854,12 @@ class TilePsf:
 	def interpolate(self, s):
 		for psf, ul, lr, eul, elr in self.tiles:
 			psf.interpolate(s)
+
+	def hfr(self):
+		hfrlist = []
+		for psf, ul, lr, eul, elr in self.tiles:
+			hfrlist.append(psf.hfr())
+		return np.median(hfrlist)
 	
 
 def testPsf(shape, psf):
@@ -1149,7 +1183,7 @@ def average_src(src, white, weights = None):
 		sum_src = sum_src + s / white[i] * w
 		sum_weights = sum_weights + w
 	res = sum_src / sum_weights
-	res[np.where(sum_weights <= 0.001)] = 1024.0 / white[0]
+	res[np.where(sum_weights <= 0.001)] = args.zero / white[0]
 	return res, sum_weights
 
 def cluster_exps(exps):
@@ -1178,7 +1212,32 @@ def cluster_exps(exps):
 	print(res)
 	return res
 		
-	
+
+def save_output(it = None):
+	res_ch = []
+	for outc in range(0, outchannels):
+		res_ch.append(cv2.multiply(res[outc], 65535.0, dtype = cv2.CV_16UC1))
+
+	outidx = 0
+	for i, fn in enumerate(outfiles):
+		res_i = []
+		for j in range(0, outfiles_c[i]):
+			res_i.append(res_ch[outidx])
+			outidx += 1
+		kwargs = {}
+                
+		if np.asarray(transp[i]).shape == res[0].shape:
+			if len(res_i) == 1:
+				kwargs = {'planarconfig': 'contig', 'photometric' : 'minisblack'}
+			#res_i.append(transp[i])
+		
+		res_i = cv2.merge(res_i)
+		if it is not None:
+			fn = "i%04d_%s" % (it, fn)
+		tifffile.imsave(fn, res_i, **kwargs)
+		del res_i
+	del res_ch
+
 
 np.set_printoptions(precision=6, linewidth=160)
 
@@ -1341,32 +1400,34 @@ if args.gaussian == 0.0:
 
 	del sum_psfsrc
 
-cluster_idx = [None] * col
-cluster_ptlists = []
-for cl_i, cl in enumerate(exp_clusters):
-	cl_psfsrc = []
-	cl_psfsrc_white = []
-	cl_weights = []
-	for i in cl:
-		cl_psfsrc.append(psfsrc[i])
-		cl_psfsrc_white.append(psfsrc_white[i])
-		cl_weights.append(weights[i])
-		cluster_idx[i] = cl_i
+	cluster_idx = [None] * col
+	cluster_ptlists = []
+	for cl_i, cl in enumerate(exp_clusters):
+		cl_psfsrc = []
+		cl_psfsrc_white = []
+		cl_weights = []
+		for i in cl:
+			cl_psfsrc.append(psfsrc[i])
+			cl_psfsrc_white.append(psfsrc_white[i])
+			cl_weights.append(weights[i])
+			cluster_idx[i] = cl_i
 
-	sum_psfsrc, sum_psfweights = average_src(cl_psfsrc, cl_psfsrc_white, cl_weights)
-	cl_ptlist = filter_ptlist(sum_psfsrc, ptlist)
+		sum_psfsrc, sum_psfweights = average_src(cl_psfsrc, cl_psfsrc_white, cl_weights)
+		cl_ptlist = filter_ptlist(sum_psfsrc, ptlist)
 
-	show = normalize(sum_psfsrc ** 0.4)
-	for (y, x, v, h, mask, low) in cl_ptlist:
-		cv2.circle(show, (int(x),int(y)), 10, (255), 1)
-	cv2.imwrite("pts%d.tif" % cl_i, show)
+		show = normalize(sum_psfsrc ** 0.4)
+		for (y, x, v, h, mask, low) in cl_ptlist:
+			cv2.circle(show, (int(x),int(y)), 10, (255), 1)
+		cv2.imwrite("pts%d.tif" % cl_i, show)
 
-	del sum_psfsrc
-	cluster_ptlists.append(cl_ptlist)
+		del sum_psfsrc
+		cluster_ptlists.append(cl_ptlist)
 
 
 psf = [None] * col
 c_ptlists = [None] * col
+
+skipped = [False] * col
 
 res = [None] * outchannels
 var = [1.0] * outchannels
@@ -1382,10 +1443,10 @@ def step1(c, lock):
 		c_ptlist = cluster_ptlists[cluster_idx[i]]
 		c_ptlists[c] = set_psf_level(psfs, c_ptlist)
 		psf[c].extract(psfs, c_ptlists[c], args.psf_filter_sigma)
+		cv2.imwrite("testpsf%d.tif" % (c), normalize(testPsf(psfsrc[c].shape, psf[c])))
 	else:
 		psf[c].gaussian(psfs, args.gaussian)
 
-	cv2.imwrite("testpsf%d.tif" % (c), normalize(testPsf(psfsrc[c].shape, psf[c])))
 
 	
 	#c_over_w = np.clip(1.0  -src[c] ** 5, 0.01, 1.0)
@@ -1437,14 +1498,16 @@ for i in range(0, it):
 	var_next = np.zeros_like(res)
 
 	#reg_weight = 1 + (float(i) / it * args.robustness ** 0.5)**2
-	dat_eps = 1/args.robustness**4
+	dat_eps = 1.0 / args.robustness**4
 	
 	def step2(c, lock):
+		if skipped[c]:
+			return
 		print("start2 %d %d" %(i,c))
 		outc = outmap[c]
 
 		b_res = psf[c].apply(res[outc])
-		scaled_src = (np.array(src[c], dtype=np.float32) * scales[c] + 1024.0 * (1.0 - scales[c])) / src_white[c]
+		scaled_src = (np.array(src[c], dtype=np.float32) * scales[c] + args.zero * (1.0 - scales[c])) / src_white[c]
 
 		weight = np.empty_like(src[c], dtype=np.float32)
 		weight[:, :] = weights[c] / (scales[c] ** np.clip(i / it, 0.0, 1))
@@ -1456,11 +1519,11 @@ for i in range(0, it):
 		weight *= w2
 		del w2
 		
-		where_over = np.where((src[c] > maxval[c] * 0.8) & (scaled_src < b_res))
-		weight[where_over] /= 1.0 + (src[c][where_over] - maxval[c] * 0.8) / (src_white[c] / 1000.0)
+		where_over = np.where((src[c] > maxval[c] * args.overexp) & (scaled_src < b_res))
+		weight[where_over] /= 1.0 + (src[c][where_over] - maxval[c] * args.overexp) / (src_white[c] / 1000.0)
 		
-		scaled_src = (np.array(src[c], dtype=np.float32) * scales[c] + 1024.0 * (1.0 - scales[c])) / src_white[c]
-		scaled_src[np.where(weight == 0)] = 1024.0 / src_white[c]
+		scaled_src = (np.array(src[c], dtype=np.float32) * scales[c] + args.zero * (1.0 - scales[c])) / src_white[c]
+		scaled_src[np.where(weight == 0)] = args.zero / src_white[c]
 		
 		dif = scaled_src - b_res
 		mean_w = 0.0000001 / (0.0000001 + dif * dif) * weight
@@ -1468,7 +1531,7 @@ for i in range(0, it):
 		gw = gradient_weight[c]
 		
 		dat = mean_w
-		
+
 		for ii in range(2):
 			difw = dif * dat
 			difw = cv2.blur(difw, (gr,gr))
@@ -1489,8 +1552,8 @@ for i in range(0, it):
 			
 		
 			dat = b_res - (src_hp) * (1.0 - np.log(cor_hp))
+
 			dat = dat * dat
-		
 			
 		
 			if ii == 1:
@@ -1548,7 +1611,7 @@ for i in range(0, it):
 		if c == 1 or c == 300:
 			cv2t.imshow("dif%d" % c, normalize(difw))
 				
-		if i > args.update_iter:
+		if args.update_iter > 0 and i > args.update_iter:
 			psf[c].update(cor_psf, dat, res[outc])
 		
 		print("end2 %d %d" %(i,c))
@@ -1668,7 +1731,7 @@ for i in range(0, it):
 
 		cv2t.imshow("reg_p%d" % outc, normalize(reg_p))
 		cv2t.imshow("reg_m%d" % outc, normalize(-reg_m))
-		cv2t.imshow("res%d" % outc, normalize(np.clip(res[outc] - 1010/65535.0,10/65535.0,1)** 0.1))
+		cv2t.imshow("res%d" % outc, normalize(np.clip(res[outc] - 1010/65535.0,10/65535.0,1)** args.show_gamma))
 
 #		if args.gaussian == 0.0:
 #			curhfr = get_hfr(res[outc], ptlist)
@@ -1676,40 +1739,36 @@ for i in range(0, it):
 			#if i < 3 and curhfr > 2:
 			#	res = cv2.erode(res, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3,3)))
 
-	cv2t.waitKey(1)
+	if args.update_iter > 0:
+		hfr_list = []
+		for c in range(0, col):
+			hfr_list.append(psf[c].hfr())
+
+		print "res_hfr", i, hfr_list
+		
+#		if i == 150:
+#			s_hfrlist = sorted(hfr_list)
+#			thr = s_hfrlist[col / 8]
+#			for c in range(0, col):
+#				skipped[c] = hfr_list[c] > thr
+#				cv2.imwrite("testpsf%d.tif" % (c), normalize(testPsf(psfsrc[c].shape, psf[c])))
+#			print "hfr thr", thr
+#			print skipped
+			
+	save_output(i)
 	
-res_ch = []
+
+	cv2t.waitKey(1)
+	gc.collect()
+	
 for outc in range(0, outchannels):
-	#reg = reg1.step2(res[outc]) + reg2.step2(res[outc]) * 0.5
-	#reg = reg * reg_weight * outc_num[outc]
-
-	#reg = cv2.divide(reg, sum_w[outc])
-	#res[outc] += reg
-
-
 	if args.gaussian == 0.0:
 		psf = TilePsf()
 		pts = set_psf_level(res[outc], ptlist)
 		psf.extract(res[outc], pts, 0.01)
 		cv2.imwrite("testpsf%d_res.tif" % (outc), normalize(testPsf(src[outc].shape, psf)))
 	
-	res_ch.append(cv2.multiply(res[outc], 65535.0, dtype = cv2.CV_16UC1))
 
-outidx = 0
-for i, fn in enumerate(outfiles):
-	res_i = []
-	for j in range(0, outfiles_c[i]):
-		res_i.append(res_ch[outidx])
-		outidx += 1
-	kwargs = {}
-                
-	if np.asarray(transp[i]).shape == res[0].shape:
-		if len(res_i) == 1:
-			kwargs = {'planarconfig': 'contig', 'photometric' : 'minisblack'}
-		#res_i.append(transp[i])
-		
-	res_i = cv2.merge(res_i)
-	tifffile.imsave(fn, res_i, **kwargs)
-
+save_output()
 
 cv2t.waitKey(1000)
