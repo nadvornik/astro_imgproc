@@ -948,7 +948,7 @@ class reg_pm_2:
 			self.m = mean_clip(g)
 
 		l = l ** 2 * self.m
-		g = 1. / (1. + (g / l) ** 0.5)
+		g = 1. / (1. + (g / l) ** 1)
 		g = cv2.GaussianBlur(g, (3,3), 0)
 		
 		cv2t.imshow("g2_%d" % g.shape[1], normalize(g))
@@ -1144,7 +1144,7 @@ class reg_pyr(Pyramid):
 				self.m[i] = mean_clip(g)
 			lm = ((l[i] * self.l_mul[i]) ** 2) * self.m[i]
 
-			g = 1. / (1. + (g / lm) ** 0.5)
+			g = 1. / (1. + (g / lm) ** 1)
 			#if i == self.depth - 1:
 			#	g = cv2.medianBlur(g, 3)
 			#g = cv2.erode(g, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3,3)))
@@ -1744,7 +1744,7 @@ for i in range(0, it):
 		for c in range(0, col):
 			hfr_list.append(psf[c].hfr())
 
-		print "res_hfr", i, hfr_list
+		print("res_hfr", i, hfr_list)
 		
 #		if i == 150:
 #			s_hfrlist = sorted(hfr_list)
