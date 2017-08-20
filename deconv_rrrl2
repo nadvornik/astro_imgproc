@@ -17,6 +17,7 @@ import argparse
 import pfor
 from cv2t import cv2t
 import gc
+import pickle
 
 from astro_utils import noise_level, poly_bg, poly_res, poly_array,  extrapolate_transp
 from centroid import centroid, sym_center
@@ -118,6 +119,11 @@ parser.add_argument("--overexp", type=float, default=0.8,
 
 parser.add_argument("--tile-overlap", type=float, default=0.25,
                     help="tile overlap")
+
+parser.add_argument("--save-psf",
+                    help="save psf")
+parser.add_argument("--load-psf",
+                    help="load psf")
 
 
 args = parser.parse_args()
@@ -434,7 +440,7 @@ def rrrl_simple(src, psf, it):
 		clip = np.where(dat > (var * kappa**2)[None, :, :])
 		
 		
-		dat = (dat + 1000.0**4) ** -0.25 * weights[:, None, None]
+		dat = (dat + 1.0 / 1000.0**4) ** -0.25 * weights[:, None, None]
 		
 		dat[clip] = 0.0
 		
@@ -612,7 +618,6 @@ class Psf:
 			return
 		try:
 			moffat = self.moffat
-			s *= args.psf_filter_moffat_scale
 			#s = 1.0 - np.clip(s, 0, 1)
 			#moffat_i = self.moffat.interpolate(s)
 			#psf = moffat.apply(self.base_psf) + self.base_psf - moffat_i.apply(self.base_psf)
@@ -760,11 +765,12 @@ class VarPsf:
 
 class TilePsf:
 	def extract(self, img, ptlist, psf_filter_sigma):
+		self.shape = img.shape
 		
 		stars_tile = len(ptlist) / args.tiles ** 2
 		print("stars per tile", stars_tile)
 		stars_tile = max(stars_tile, 20)
-		h, w = img.shape
+		h, w = self.shape
 
 		tile_size_h = int((h + args.tiles - 1) / args.tiles)
 		tile_size_w = int((w + args.tiles - 1) / args.tiles)
@@ -804,7 +810,8 @@ class TilePsf:
 
 	def gaussian(self, img, sigma):
 		
-		h, w = img.shape
+		self.shape = img.shape
+		h, w = self.shape
 
 		tile_size_h = int((h + args.tiles - 1) / args.tiles)
 		tile_size_w = int((w + args.tiles - 1) / args.tiles)
@@ -826,6 +833,10 @@ class TilePsf:
 				self.tiles.append((psf, ul, lr, eul, elr))
 		
 	def apply(self, img, flip = False):
+		if self.shape != img.shape:
+			raise ValueError("psf shape differs")
+	
+	
 		res = np.zeros_like(img)
 		#mask = np.zeros_like(img)
 		
@@ -1434,26 +1445,37 @@ var = [1.0] * outchannels
 reg_prev = [None] * outchannels
 kappa = 10.0
 
-
-def step1(c, lock):
-	print("start0  %d" % c)
-	psf[c] = TilePsf()
-	psfs = np.array(psfsrc[c], dtype = np.float32) / psfsrc_white[c]
-	if args.gaussian == 0.0:
-		c_ptlist = cluster_ptlists[cluster_idx[i]]
-		c_ptlists[c] = set_psf_level(psfs, c_ptlist)
-		psf[c].extract(psfs, c_ptlists[c], args.psf_filter_sigma)
-		cv2.imwrite("testpsf%d.tif" % (c), normalize(testPsf(psfsrc[c].shape, psf[c])))
+try:
+	if args.load_psf:
+		f = open(args.load_psf, 'rb')
+		psf = pickle.load(f)
+		f.close()
+		for c in range(0, col):
+			cv2.imwrite("testpsf%d.tif" % (c), normalize(testPsf(psfsrc[c].shape, psf[c])))
 	else:
-		psf[c].gaussian(psfs, args.gaussian)
+		raise IOError
+except:
+	psf = [None] * col
+
+	def step1(c, lock):
+		print("start0  %d" % c)
+		psf[c] = TilePsf()
+		psfs = np.array(psfsrc[c], dtype = np.float32) / psfsrc_white[c]
+		if args.gaussian == 0.0:
+			c_ptlist = cluster_ptlists[cluster_idx[i]]
+			c_ptlists[c] = set_psf_level(psfs, c_ptlist)
+			psf[c].extract(psfs, c_ptlists[c], args.psf_filter_sigma)
+			cv2.imwrite("testpsf%d.tif" % (c), normalize(testPsf(psfsrc[c].shape, psf[c])))
+		else:
+			psf[c].gaussian(psfs, args.gaussian)
 
 
-	
-	#c_over_w = np.clip(1.0  -src[c] ** 5, 0.01, 1.0)
-	#over_w[c] = np.array(c_over_w, dtype=np.float32)
-	#print "check c_over_w", np.isnan(c_over_w).any(), cv2.minMaxLoc(c_over_w)
-pfor.pfor(step1, list(range(0, col)))
+	pfor.pfor(step1, list(range(0, col)))
 
+	if args.save_psf:
+		f = open(args.save_psf, 'wb')
+		pickle.dump(psf, f)
+		f.close()
 
 for c in range(0, outchannels):
 	res[c] = cv2.GaussianBlur(s_res, (15,15), 0)
@@ -1467,6 +1489,8 @@ print("noise:", noise * 65535.0)
 reg1 = reg_pm_2_pyr(reg = args.reg2, l = args.reg_lambda2)
 reg2 = reg_pyr(reg = args.reg4, l = args.reg_lambda4)
 
+for c in range(0, col):
+	psf[c].interpolate(args.psf_filter_moffat_scale)
 
 it = args.iter
 
@@ -1474,8 +1498,6 @@ for i in range(0, it):
 
 	print(i)
 	
-	for c in range(0, col):
-		psf[c].interpolate(float(i) / it)
 
 	s_res = np.mean(res, axis = 0)
 	print("check s_res", np.isnan(s_res).any(), cv2.minMaxLoc(s_res))
@@ -1499,6 +1521,12 @@ for i in range(0, it):
 
 	#reg_weight = 1 + (float(i) / it * args.robustness ** 0.5)**2
 	dat_eps = 1.0 / args.robustness**4
+	
+	rings = []
+	for outc in range(0, outchannels):
+		r = np.clip(cv2.GaussianBlur(res[outc], (3,3), 0) - res[outc], 0.0, 1.0)
+		r = r * 1000000 + 1
+		rings.append(r)
 	
 	def step2(c, lock):
 		if skipped[c]:
@@ -1531,6 +1559,8 @@ for i in range(0, it):
 		gw = gradient_weight[c]
 		
 		dat = mean_w
+		
+		#b_rings = psf[c].apply(rings[outc])
 
 		for ii in range(2):
 			difw = dif * dat
@@ -1565,6 +1595,11 @@ for i in range(0, it):
 			dat = (dat + dat_eps) ** -0.25
 		
 			dat *= weight / src_white[c]
+		
+		#dat *= b_rings
+		#if c == 1 or c == 300:
+		#	cv2t.imshow("b_rings%d" % c, normalize(b_rings))
+		#del(b_rings)
 		
 		
 		cor = cv2.divide(scaled_src - difw * (1.0 - gw), b_res)
@@ -1610,23 +1645,28 @@ for i in range(0, it):
 		
 		if c == 1 or c == 300:
 			cv2t.imshow("dif%d" % c, normalize(difw))
+		
 				
 		if args.update_iter > 0 and i > args.update_iter:
 			psf[c].update(cor_psf, dat, res[outc])
 		
 		print("end2 %d %d" %(i,c))
-	pfor.pfor(step2, list(range(0, col)))
+	pfor.pfor(step2, list(range(0, col)) if i % 2 == 0 else reversed(list(range(0, col))))
 	
 	print("scales", scales)
 	
 	var = var_next
 
-	norm_w = np.mean(sum_w) / np.mean(sum_w, axis = 0)
-	#norm_w = cv2.dilate(norm_w, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (19,19)))
-	norm_w = cv2.GaussianBlur(norm_w, (13,13), 0)
-	norm_w = np.clip(norm_w, 1.0, 10.0)
+	norm_w = []
+	for sw in sum_w:
+		norm_w.append(sw / np.median(sw))
+	norm_w = 1.0 / np.mean(norm_w, axis = 0)
+	
+	norm_w = cv2.dilate(norm_w, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (11,11)))
+	norm_w = np.clip(norm_w, 1.0, 20.0)
+	norm_w = cv2.GaussianBlur(norm_w, (11,11), 0)
 		
-	cv2t.imshow("norm_w", norm_w / 10)
+	cv2t.imshow("norm_w", norm_w / 20.0)
 
 	reg1.step1(res, norm_w, i < args.lambda_eval_iter)
 	#reg2 = reg_pm_4(size = 1)
@@ -1635,6 +1675,7 @@ for i in range(0, it):
 
 	for outc in range(0, outchannels):
 		var[outc] /= outc_num[outc]
+		print("check rings", np.isnan(rings[outc]).any(), cv2.minMaxLoc(rings[outc]))
 
 		print("check res_pre", np.isnan(res[outc]).any(), cv2.minMaxLoc(res[outc]))
 
@@ -1685,10 +1726,11 @@ for i in range(0, it):
 		
 		
 		#print reg
+		reg *= (1.0 + args.reg_plus * (np.clip(norm_w, 1 , 3) - 1.0) / 2.0)
 		reg_p = np.array(reg)
 		reg_p[np.where(reg < 0.)] = 0.
 		reg_m = reg - reg_p
-		reg = reg_m + reg_p * args.reg_plus
+		reg = reg_m + reg_p
 	
 		#res[outc] *= cv2.divide(1 + reg_p, 1 - reg_m)
 
@@ -1708,7 +1750,7 @@ for i in range(0, it):
 		floodmask = np.zeros((res[outc].shape[0] + 2, res[outc].shape[1] + 2), dtype=np.uint8)
 		cv2.floodFill(res[outc], floodmask, minLoc, 2, loDiff = 0, upDiff = (maxVal - minVal) * args.top_thres, flags = 256 + 8 + cv2.FLOODFILL_MASK_ONLY + cv2.FLOODFILL_FIXED_RANGE)
 		floodmask = floodmask[1:-1, 1:-1]
-		cv2t.imshow("fm%d" % outc, normalize(floodmask))
+		#cv2t.imshow("fm%d" % outc, normalize(floodmask))
 		top = cv2.dilate(res[outc], cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (15,15)))
 		top = cv2.erode(top, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (15,15)))
 		top[floodmask > 0] = 0
