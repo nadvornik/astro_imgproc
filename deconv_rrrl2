@@ -120,6 +120,9 @@ parser.add_argument("--overexp", type=float, default=0.8,
 parser.add_argument("--tile-overlap", type=float, default=0.25,
                     help="tile overlap")
 
+parser.add_argument("--weight-dilate", type=int, default=2,
+                    help="weight dilate")
+
 parser.add_argument("--save-psf",
                     help="save psf")
 parser.add_argument("--load-psf",
@@ -285,7 +288,7 @@ def find_ptlist(img):
 	return ptlist
 
 def filter_ptlist(img, i_ptlist):
-	minv = 128 / 65535.0
+	minv = 512 / 65535.0
 
 	maxval = np.max(img)
 
@@ -459,10 +462,10 @@ def rrrl_simple(src, psf, it):
 		
 		cor = cv2.divide(sum_corw, sum_w)
 		res *= cor
-	print(scales)
+	#print(scales)
 	res -= psf_zero
 	res[np.where(res < 0)] = 0
-	return res
+	return res, dat
 		
 
 
@@ -476,49 +479,115 @@ class PsfGauss:
 		return cv2.GaussianBlur(img, (self.size, self.size), self.sigma)
 
 class PsfMoffat:
-	def __init__(self, size, alpha = 1, beta=4.765, psf = None):
+	def __init__(self, size, alpha = 1, beta=4.765, ring=10, ring_s = 1, psf = None, residual = None):
 		self.size = size
 		self.mx = (size - 1) / 2.0
 		self.my = (size - 1) / 2.0
 		
 		if psf is not None:
-			alpha, beta = self.fit(psf)
-		
-		self.set(alpha, beta)
+			self.fit(psf, residual)
+		else:
+			self.set(alpha, beta, ring, ring_s)
 
-	def fit(self, psf):
-		def moffat2d(xy, alpha, beta, mag, shift):
-			x, y = xy
-			r2 = (x - self.mx) ** 2 + (y - self.my) ** 2
-			return shift + mag * (1 + (r2 / (alpha * alpha))) ** -beta
+	def fit(self, psf, residual = None):
+		r2 = np.array([[ (x - self.mx) ** 2 + (y - self.my) ** 2 for x in range(0, self.size)] for y in range(0, self.size)])
+	
+		def moffat2d(yx, alpha, beta, mag, shift):
+			y, x = yx
+			#print(alpha, beta, mag, shift)
+			moffat = (1 + (r2 / (alpha * alpha))) ** -beta
+			if residual is not None:
+				moffat = cv2.filter2D(residual, -1, moffat)
+			#cv2t.imshow("iter", normalize(moffat ** 0.4))
+			ret = shift + mag * moffat[x, y]
+			#print(ret)
+			return ret
 
 		cv2t.imshow("src", normalize(psf ** 0.4))
+		if residual is not None:
+			cv2t.imshow("residual", normalize(residual ** 0.4))
 
 		x0 = np.arange(self.size)
 		y0 = np.arange(self.size)
 		y, x = np.meshgrid(y0, x0)
 		yx = (y.ravel(), x.ravel())
-		z = psf.ravel()
+		z = psf.ravel() * 1000.0
 
-		shift = np.amin(psf)
+		shift = np.amin(z)
 		mag = np.amax(z) - shift
 		
 		try:
-			popt, pcov = curve_fit(moffat2d, yx, z, p0 = [1, 4.765, mag, shift], bounds = ([0, 0, 0, 0], [np.inf, np.inf, np.inf, np.inf]))
-			print (popt)
-		except:
+			popt, pcov = curve_fit(moffat2d, yx, z, p0 = [1, 5, mag, shift], bounds = ([0.01, 1, 0, 0], [4.0, 10, np.inf, np.inf]), loss='soft_l1', verbose = 1, xtol=1e-12, ftol=1e-12, gtol=1e-12, jac = '3-point')
+			print ("fit1a", popt)
+			sigma = z - moffat2d(yx, *popt)
+			ss = np.median(sigma ** 2) ** 0.5 * 0.2
+			sigma[np.where(sigma < ss)] = ss
+			popt, pcov = curve_fit(moffat2d, yx, z, p0 = popt, bounds = ([0.01, 1, 0, 0], [4.0, 10, np.inf, np.inf]), loss='soft_l1', verbose = 1, xtol=1e-12, ftol=1e-12, gtol=1e-12, jac = '3-point', sigma = sigma)
+			print ("fit1b", popt)
+			sigma = z - moffat2d(yx, *popt)
+			cv2t.imshow("dif1", normalize(np.reshape(sigma, psf.shape)))
+
+		except  Exception as e:
+			print(e)
 			popt = [1.0, 4.765, mag, shift]
-		return popt[0], popt[1]
+		self.set(popt[0], popt[1])
+
+	def fit2(self, psf, residual = None):
+		r2 = np.array([[ (x - self.mx) ** 2 + (y - self.my) ** 2 for x in range(0, self.size)] for y in range(0, self.size)])
+	
+		def moffat2d(xy, alpha, ring, ring_s, mag, shift):
+			beta = self.beta
+			y, x = yx
+			#print(alpha, beta, mag, shift)
+			moffat = (1 + (r2 / (alpha * alpha))) ** -beta * (1.0 - 1.0 / (1 + (r2 ** 0.5 * ring_s - ring)**4))
+			if residual is not None:
+				moffat = cv2.filter2D(residual, -1, moffat)
+			#cv2t.imshow("iter", normalize(moffat ** 0.4))
+			ret = shift + mag * moffat[x, y]
+			#print(ret)
+			return ret
+
+		cv2t.imshow("src", normalize(psf ** 0.4))
+		if residual is not None:
+			cv2t.imshow("residual", normalize(residual ** 0.4))
+
+		x0 = np.arange(self.size)
+		y0 = np.arange(self.size)
+		y, x = np.meshgrid(y0, x0)
+		yx = (y.ravel(), x.ravel())
+		z = psf.ravel() * 1000.0
+
+		shift = np.amin(z)
+		mag = np.amax(z) - shift
+		
+		try:
+			popt, pcov = curve_fit(moffat2d, yx, z, p0 = [1, 2, 1, mag, shift], bounds = ([0.01, 2, 1, 0, 0], [4.0, np.inf, np.inf, np.inf, np.inf]), loss='soft_l1', verbose = 1, xtol=1e-12, ftol=1e-12, gtol=1e-12, jac = '3-point')
+			print ("fit2a", popt)
+			sigma = z - moffat2d(yx, *popt)
+			ss = np.median(sigma ** 2) ** 0.5 * 0.2
+			sigma[np.where(sigma < ss)] = ss
+			popt, pcov = curve_fit(moffat2d, yx, z, p0 = popt, bounds = ([0.01, 2, 1, 0, 0], [4.0, np.inf, np.inf, np.inf, np.inf]), loss='soft_l1', verbose = 1, xtol=1e-12, ftol=1e-12, gtol=1e-12, jac = '3-point', sigma = sigma)
+			print ("fit2b", popt)
+			sigma = z - moffat2d(yx, *popt)
+			cv2t.imshow("dif2", normalize(np.reshape(sigma, psf.shape)))
+		except  Exception as e: 
+			print(e)
+			popt = [1.0, 0, 0, mag, shift]
+		self.set(popt[0], self.beta, popt[1], popt[2])
 
 
 
-	def set(self, alpha, beta):
+	def set(self, alpha, beta, ring = 0, ring_s = 0):
 		self.alpha = alpha
 		self.beta = beta
+		self.ring = ring
+		self.ring_s = ring_s
 		
 		r2 = np.array([[((x - self.mx) **2 + (y - self.my)**2) for x in range(self.size) ] for y in range(self.size) ], dtype=np.float)
 		
-		self.psf = (1 + r2 / (alpha * alpha)) ** -beta
+		self.psf = (1 + r2 / (alpha **2 )) ** -beta
+		if ring_s > 0:
+			self.psf *= (1.0 - 1.0 / (1 + (r2 ** 0.5 * ring_s - ring)**4))
 
 		cv2t.imshow("moffat", normalize(self.psf ** 0.4))
 	
@@ -527,10 +596,19 @@ class PsfMoffat:
 	def interpolate(self, s):
 		if s < 0.01:
 			s = 0.01
-		return PsfMoffat(self.size, self.alpha * s ** 0.5, self.beta)
+		return PsfMoffat(self.size, self.alpha * s ** 0.5, self.beta / s ** 0.5, self.ring, self.ring_s)
 	
 	def apply(self, img, flip = False):
 		return cv2.filter2D(img, -1, self.psf)
+
+def moffat_mean(moffat_list):
+	beta = [p.beta for p in moffat_list]
+	print("beta", beta)
+	beta = np.median(beta)
+	print("med", beta)
+	for p in moffat_list:
+		p.set(p.alpha, beta, p.ring, p.ring_s)
+
 
 class Psf:
 	def set(self, psf):
@@ -550,16 +628,31 @@ class Psf:
 	def from_psflist(self, psflist, psf_filter_sigma):
 		if len(psflist) == 0:
 			return self.gaussian(None, 1.0)
-			
 		#psf = rrrl_simple(psflist, PsfMoffat(args.diameter * 2 + 1, 3, 2), 30)
-		psf = rrrl_simple(psflist, PsfGauss(args.diameter * 2 + 1, psf_filter_sigma), 50)
+		psf, weights = rrrl_simple(psflist, PsfGauss(args.diameter * 2 + 1, psf_filter_sigma), 50)
 		
-		#psf = rrrl_simple(psflist, PsfMoffat(args.diameter * 2 + 1, psf_filter_sigma * 2.35482, 4.7), 30)
-		#mask, sigma = poly_bg(psf, order = 1, scale = 1, it = 10, get_mask = True)
-		#mask = mask[:,:,0]
-		#mask = cv2.dilate(mask, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9,9)))
-		#mask[np.where(psf >= np.amax(psf) * 0.9)] = 0
-		#mask = cv2.erode(mask, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7,7)))
+#		psfgrad = (cv2.Sobel(psf, -1, 1,0,ksize=3)**2 + cv2.Sobel(psf, -1, 0,1,ksize=3)**2) ** 0.5
+		#psfgrad2 = (cv2.Sobel(psfgrad, -1, 1,0,ksize=3)**2 + cv2.Sobel(psfgrad, -1, 0,1,ksize=3)**2) ** 0.5
+		#cv2t.imshow("psfgrad2" , normalize(psfgrad2))
+		
+#		med_grad = float(np.mean(psfgrad))
+		#print(med_grad)
+		
+		
+		
+#		psfgrad[np.where(psfgrad < med_grad * 3)] = 0
+#		cv2t.imshow("psfgrad" , normalize(psfgrad))
+		
+#		floodmask = np.zeros((psf.shape[0] + 2, psf.shape[1] + 2), dtype=np.uint8)
+#		cv2.floodFill(psfgrad, floodmask, (0,0), 255, loDiff = 0, upDiff = med_grad * 3, flags = 256 + 8 + cv2.FLOODFILL_MASK_ONLY)
+#		mask = 1 - floodmask[1:-1, 1:-1]
+#		cv2t.imshow("psfgradmask", mask * 255)
+
+
+
+		
+
+
 		
 		floodmask = np.zeros((psf.shape[0] + 2, psf.shape[1] + 2), dtype=np.uint8)
 		bl_psf = cv2.medianBlur(psf, 3)
@@ -586,32 +679,51 @@ class Psf:
 		mask[:, 0] = 0
 		mask[:, -1] = 0
 		
-		cv2t.imshow("mask" , normalize(mask))
 		cv2t.imshow("psf1" , normalize(psf ** 0.4))
 		
-		border = cv2.dilate(mask, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3,3))) - mask
-		
-		cv2t.imshow("border" , normalize(border))
+#		mask = cv2.erode(mask, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3,3)))
+		#border = cv2.dilate(mask, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3,3))) - mask
 
-		psf -= np.mean(psf[np.where(border != 0)])
-		psf[np.where(mask == 0)] = 0
+
+		low = np.median(psf)
+		psf -= low
 		psf[np.where(psf < 0)] = 0
+		psf[np.where(mask == 0)] = 0
+
+		thr = np.mean(psf[np.where(mask != 0)]) 
+		mask = np.clip(psf, 0, thr) / thr
+		cv2t.imshow("mask", mask)
+		
+		psf *= mask
+		
 		if psf.sum() == 0:
 			psf[args.diameter, args.diameter] += 1
 		cv2t.imshow("psf2" , normalize(psf ** 0.4))
 			
-			
-		self.set(cv2.GaussianBlur(psf, (args.diameter * 2 + 1, args.diameter * 2 + 1), args.psf_filter_sigma_res))
-		#self.set(psf)
 		self.base_psf = psf
+			
+		self.target = np.mean(psflist, axis = 0)
+		#target = cv2.erode(target, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3,3)))
+		self.residual = cv2.GaussianBlur(psf, (args.diameter * 2 + 1, args.diameter * 2 + 1), args.psf_filter_sigma_res)
+		#residual = cv2.dilate(residual, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3,3)))
 		
-		res_psf = rrrl_simple(psflist, self, 50)
-		
-		self.moffat = PsfMoffat(args.diameter * 2 + 1, psf = res_psf)
+		self.moffat = PsfMoffat(args.diameter * 2 + 1, psf = self.target, 
+				residual = self.residual)
 		psf = self.moffat.apply(psf)
+		
+		cv2t.imshow("srcfit" , normalize(psf ** 0.4))
+		
+		self.target = np.average(psflist, axis = 0, weights = weights)
 		
 		self.set(psf)
 		#cv2t.imshow("psf%d" % id(self) , normalize(self.psf ** 0.5))
+	
+	def fit2(self):
+		self.moffat.fit2(self.target, self.residual)
+		psf = self.moffat.apply(self.base_psf)
+		cv2t.imshow("srcfit2" , normalize(psf ** 0.4))
+
+		self.set(psf)
 	
 	def interpolate(self, s):
 		if self.updated:
@@ -806,6 +918,10 @@ class TilePsf:
 					psf.from_psflist(psflist, psf_filter_sigma)
 					self.tiles.append((psf, ul, lr, eul_mo, elr_mo))
 
+		moffat_mean([t[0].moffat for t in self.tiles])
+		for t in self.tiles:
+			t[0].fit2()
+
 		#print(self.tiles)
 
 	def gaussian(self, img, sigma):
@@ -911,7 +1027,7 @@ def mean_clip(src):
 		avg, stddev = cv2.meanStdDev(src, mask=mask)
 	
 	avg = float(avg)
-	print("mean", avg)
+	print("mean_{}: {}".format(src.shape, avg))
 	return avg
 
 
@@ -960,7 +1076,7 @@ class reg_pm_2:
 
 		l = l ** 2 * self.m
 		g = 1. / (1. + (g / l) ** 1)
-		g = cv2.GaussianBlur(g, (3,3), 0)
+		#g = cv2.GaussianBlur(g, (3,3), 0)
 		
 		cv2t.imshow("g2_%d" % g.shape[1], normalize(g))
 		self.gx = np.mean([g[1:, 1:-1], g[:-1, 1:-1]], axis = 0)
@@ -1104,7 +1220,7 @@ class reg_pm_2_pyr(Pyramid):
 	
 		gp = []
 		for res in res_a:
-			gp.append(self.gaussian_pyr_er(res))
+			gp.append(self.gaussian_pyr(res))
 		
 		self.levels = []
 		for i, (img, ll, lm) in enumerate(zip(zip(*gp), l, self.l_mul)):
@@ -1118,7 +1234,7 @@ class reg_pm_2_pyr(Pyramid):
 			self.levels.append(pm)
 	
 	def step2(self, c):
-		gp = self.gaussian_pyr_er(c)
+		gp = self.gaussian_pyr(c)
 		resp = []
 		for pm, img in zip(self.levels, gp):
 			print(pm.gx.shape, img.shape)
@@ -1159,7 +1275,7 @@ class reg_pyr(Pyramid):
 			#if i == self.depth - 1:
 			#	g = cv2.medianBlur(g, 3)
 			#g = cv2.erode(g, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3,3)))
-			g = cv2.GaussianBlur(g, (3,3), 0)
+			#g = cv2.GaussianBlur(g, (3,3), 0)
 
 			#g = cv2.dilate(g, cv2.getStructuringElement(cv2.MORPH_CROSS, (3,3)))
 		
@@ -1478,7 +1594,7 @@ except:
 		f.close()
 
 for c in range(0, outchannels):
-	res[c] = cv2.GaussianBlur(s_res, (15,15), 0)
+	res[c] = cv2.GaussianBlur(s_res, (3,3), 0)
 
 res = np.array(res)
 
@@ -1489,15 +1605,18 @@ print("noise:", noise * 65535.0)
 reg1 = reg_pm_2_pyr(reg = args.reg2, l = args.reg_lambda2)
 reg2 = reg_pyr(reg = args.reg4, l = args.reg_lambda4)
 
-for c in range(0, col):
-	psf[c].interpolate(args.psf_filter_moffat_scale)
+#for c in range(0, col):
+#	psf[c].interpolate(args.psf_filter_moffat_scale)
 
 it = args.iter
 
 for i in range(0, it):
 
 	print(i)
-	
+	if i <= it / 2:
+		for c in range(0, col):
+			psf[c].interpolate(args.psf_filter_moffat_scale * np.clip(i *  2.0 / it, 0, 1))
+
 
 	s_res = np.mean(res, axis = 0)
 	print("check s_res", np.isnan(s_res).any(), cv2.minMaxLoc(s_res))
@@ -1532,13 +1651,14 @@ for i in range(0, it):
 		if skipped[c]:
 			return
 		print("start2 %d %d" %(i,c))
+		kappa = (it - i) / it * 10 + 2
 		outc = outmap[c]
 
 		b_res = psf[c].apply(res[outc])
 		scaled_src = (np.array(src[c], dtype=np.float32) * scales[c] + args.zero * (1.0 - scales[c])) / src_white[c]
 
 		weight = np.empty_like(src[c], dtype=np.float32)
-		weight[:, :] = weights[c] / (scales[c] ** np.clip(i / it, 0.0, 1))
+		weight[:, :] = weights[c] / (scales[c] ** np.clip(i * 2.0 / it, 0.0, 1))
 		
 		gr = args.gradient_radius
 		w2 = cv2.blur(weight, (gr,gr)) / src_white[c]
@@ -1590,12 +1710,13 @@ for i in range(0, it):
 				with lock:
 					var_next[outc] += dat
 				clip = np.where(dat > var[outc] * kappa * kappa)
-				dat[clip] = 100000000000000
+				
 		
 			dat = (dat + dat_eps) ** -0.25
 		
 			dat *= weight / src_white[c]
 		
+		dat[clip] = 0
 		#dat *= b_rings
 		#if c == 1 or c == 300:
 		#	cv2t.imshow("b_rings%d" % c, normalize(b_rings))
@@ -1662,16 +1783,16 @@ for i in range(0, it):
 		norm_w.append(sw / np.median(sw))
 	norm_w = 1.0 / np.mean(norm_w, axis = 0)
 	
-	norm_w = cv2.dilate(norm_w, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (11,11)))
-	norm_w = np.clip(norm_w, 1.0, 20.0)
-	norm_w = cv2.GaussianBlur(norm_w, (11,11), 0)
+	norm_w = cv2.dilate(norm_w, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (args.weight_dilate * 2 + 1, args.weight_dilate * 2 + 1)))
+	norm_w = np.clip(norm_w, 1.0, 10.0)
+	norm_w = cv2.GaussianBlur(norm_w, (args.weight_dilate * 2 + 1, args.weight_dilate * 2 + 1), 0)
 		
-	cv2t.imshow("norm_w", norm_w / 20.0)
+	cv2t.imshow("norm_w", norm_w / 10.0)
 
-	reg1.step1(res, norm_w, i < args.lambda_eval_iter)
+	reg1.step1(res, norm_w ** 0, i < args.lambda_eval_iter)
 	#reg2 = reg_pm_4(size = 1)
 	#reg2.step1(res, args.reg_lambda * norm_w)
-	reg2.step1(res, norm_w, i < args.lambda_eval_iter)
+	reg2.step1(res, norm_w ** 0, i < args.lambda_eval_iter)
 
 	for outc in range(0, outchannels):
 		var[outc] /= outc_num[outc]
@@ -1745,6 +1866,7 @@ for i in range(0, it):
 
 
 		minVal, maxVal, minLoc, maxLoc = cv2.minMaxLoc(res[outc])
+		maxVal = min(maxVal, 1.0)
 		avg, stddev = cv2.meanStdDev(res[outc])
 		
 		floodmask = np.zeros((res[outc].shape[0] + 2, res[outc].shape[1] + 2), dtype=np.uint8)
@@ -1803,12 +1925,12 @@ for i in range(0, it):
 	cv2t.waitKey(1)
 	gc.collect()
 	
-for outc in range(0, outchannels):
-	if args.gaussian == 0.0:
-		psf = TilePsf()
-		pts = set_psf_level(res[outc], ptlist)
-		psf.extract(res[outc], pts, 0.01)
-		cv2.imwrite("testpsf%d_res.tif" % (outc), normalize(testPsf(src[outc].shape, psf)))
+#for outc in range(0, outchannels):
+#	if args.gaussian == 0.0:
+#		psf = TilePsf()
+#		pts = set_psf_level(res[outc], ptlist)
+#		psf.extract(res[outc], pts, 0.01)
+#		cv2.imwrite("testpsf%d_res.tif" % (outc), normalize(testPsf(src[outc].shape, psf)))
 	
 
 save_output()
