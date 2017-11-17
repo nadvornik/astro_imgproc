@@ -95,6 +95,9 @@ parser.add_argument("--top-thres", type=float, default=0.5,
 parser.add_argument("--robustness", type=float, default=1000,
                     help="robustness")
 
+parser.add_argument("--dering", type=float, default=0.9,
+                    help="deringing")
+
 
 parser.add_argument("--gaussian", type=float, default=0.0,
                     help="blind with gaussian")
@@ -127,7 +130,6 @@ parser.add_argument("--save-psf",
                     help="save psf")
 parser.add_argument("--load-psf",
                     help="load psf")
-
 
 args = parser.parse_args()
 
@@ -596,7 +598,7 @@ class PsfMoffat:
 	def interpolate(self, s):
 		if s < 0.01:
 			s = 0.01
-		return PsfMoffat(self.size, self.alpha * s ** 0.5, self.beta / s ** 0.5, self.ring, self.ring_s)
+		return PsfMoffat(self.size, self.alpha * s ** 0.5, self.beta, self.ring, self.ring_s)
 	
 	def apply(self, img, flip = False):
 		return cv2.filter2D(img, -1, self.psf)
@@ -713,7 +715,7 @@ class Psf:
 		
 		cv2t.imshow("srcfit" , normalize(psf ** 0.4))
 		
-		self.target = np.average(psflist, axis = 0, weights = weights)
+		#self.target = np.average(psflist, axis = 0, weights = weights)
 		
 		self.set(psf)
 		#cv2t.imshow("psf%d" % id(self) , normalize(self.psf ** 0.5))
@@ -1075,8 +1077,8 @@ class reg_pm_2:
 			self.m = mean_clip(g)
 
 		l = l ** 2 * self.m
-		g = 1. / (1. + (g / l) ** 1)
-		#g = cv2.GaussianBlur(g, (3,3), 0)
+		g = 1. / (1. + (g / l)) ** 2
+		g = cv2.GaussianBlur(g, (3,3), 0)
 		
 		cv2t.imshow("g2_%d" % g.shape[1], normalize(g))
 		self.gx = np.mean([g[1:, 1:-1], g[:-1, 1:-1]], axis = 0)
@@ -1295,7 +1297,14 @@ class reg_pyr(Pyramid):
 		
 		return self.collapse(reg_lp)
 
-
+def bg_level(src):
+	res = cv2.blur(src, (3, 3))
+	res = cv2.erode(res, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (args.diameter * 2 + 1,args.diameter * 2 + 1)))
+	res = cv2.blur(res, (args.diameter * 2 + 1,args.diameter * 2 + 1))
+	res = cv2.blur(res, (args.diameter * 2 + 1,args.diameter * 2 + 1))
+	res = cv2.blur(res, (args.diameter * 2 + 1,args.diameter * 2 + 1))
+	res = cv2.blur(res, (args.diameter * 2 + 1,args.diameter * 2 + 1))
+	return res
 
 def average_src(src, white, weights = None):
 	sum_src = 0.0
@@ -1559,6 +1568,7 @@ skipped = [False] * col
 res = [None] * outchannels
 var = [1.0] * outchannels
 reg_prev = [None] * outchannels
+offset = [0.0] * outchannels
 kappa = 10.0
 
 try:
@@ -1641,11 +1651,11 @@ for i in range(0, it):
 	#reg_weight = 1 + (float(i) / it * args.robustness ** 0.5)**2
 	dat_eps = 1.0 / args.robustness**4
 	
-	rings = []
 	for outc in range(0, outchannels):
-		r = np.clip(cv2.GaussianBlur(res[outc], (3,3), 0) - res[outc], 0.0, 1.0)
-		r = r * 1000000 + 1
-		rings.append(r)
+		#offset[outc] = np.amin(res[outc]) * args.dering
+		offset[outc] = bg_level(res[outc]) * args.dering
+		res[outc] -= offset[outc]
+		res[outc][res[outc] <=0] = 0.0000000001
 	
 	def step2(c, lock):
 		if skipped[c]:
@@ -1670,8 +1680,8 @@ for i in range(0, it):
 		where_over = np.where((src[c] > maxval[c] * args.overexp) & (scaled_src < b_res))
 		weight[where_over] /= 1.0 + (src[c][where_over] - maxval[c] * args.overexp) / (src_white[c] / 1000.0)
 		
-		scaled_src = (np.array(src[c], dtype=np.float32) * scales[c] + args.zero * (1.0 - scales[c])) / src_white[c]
 		scaled_src[np.where(weight == 0)] = args.zero / src_white[c]
+		scaled_src -= offset[outc]
 		
 		dif = scaled_src - b_res
 		mean_w = 0.0000001 / (0.0000001 + dif * dif) * weight
@@ -1680,8 +1690,6 @@ for i in range(0, it):
 		
 		dat = mean_w
 		
-		#b_rings = psf[c].apply(rings[outc])
-
 		for ii in range(2):
 			difw = dif * dat
 			difw = cv2.blur(difw, (gr,gr))
@@ -1717,11 +1725,6 @@ for i in range(0, it):
 			dat *= weight / src_white[c]
 		
 		dat[clip] = 0
-		#dat *= b_rings
-		#if c == 1 or c == 300:
-		#	cv2t.imshow("b_rings%d" % c, normalize(b_rings))
-		#del(b_rings)
-		
 		
 		cor = cv2.divide(scaled_src - difw * (1.0 - gw), b_res)
 		cor[np.where(cor < 0.00001)] = 0.00001
@@ -1796,8 +1799,6 @@ for i in range(0, it):
 
 	for outc in range(0, outchannels):
 		var[outc] /= outc_num[outc]
-		print("check rings", np.isnan(rings[outc]).any(), cv2.minMaxLoc(rings[outc]))
-
 		print("check res_pre", np.isnan(res[outc]).any(), cv2.minMaxLoc(res[outc]))
 
 		#cor = cv2.divide(sum_corw[outc], sum_w[outc])
@@ -1844,8 +1845,6 @@ for i in range(0, it):
 		#else:
 		#	reg_prev[outc] = (reg * 0.1)
 		
-		
-		
 		#print reg
 		reg *= (1.0 + args.reg_plus * (np.clip(norm_w, 1 , 3) - 1.0) / 2.0)
 		reg_p = np.array(reg)
@@ -1860,11 +1859,10 @@ for i in range(0, it):
 		cor[missing] = 1.0
 		cor[np.where(cor < 0.01)] = 0.01
 		cor[np.where(cor > 100.)] = 100.
-
+		
 		res[outc] *= cor
 		res[outc] += reg
-
-
+		
 		minVal, maxVal, minLoc, maxLoc = cv2.minMaxLoc(res[outc])
 		maxVal = min(maxVal, 1.0)
 		avg, stddev = cv2.meanStdDev(res[outc])
@@ -1895,6 +1893,8 @@ for i in range(0, it):
 
 		cv2t.imshow("reg_p%d" % outc, normalize(reg_p))
 		cv2t.imshow("reg_m%d" % outc, normalize(-reg_m))
+		
+		res[outc] += offset[outc]
 		cv2t.imshow("res%d" % outc, normalize(np.clip(res[outc] - 1010/65535.0,10/65535.0,1)** args.show_gamma))
 
 #		if args.gaussian == 0.0:
