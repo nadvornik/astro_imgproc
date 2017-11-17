@@ -32,6 +32,9 @@ parser.add_argument("outfile",
 parser.add_argument("infile",
                     help="input tiff file")
 
+parser.add_argument("--color",
+                    help="input color tiff file")
+
 parser.add_argument('--zero', type=int, default = 0,
                    help='output zero level')
 
@@ -43,6 +46,9 @@ parser.add_argument("--sigmaeps", type=float, default=1.0,
                     
 
 parser.add_argument("--sigma", type=float, default=0,
+                    help="sigma")
+
+parser.add_argument("--color-sigma", type=float, default=0,
                     help="sigma")
 
 
@@ -61,12 +67,15 @@ parser.add_argument("--edges", type=float, default=1.0,
 
 parser.add_argument("--normalize", action='store_true', default=False)
 
+parser.add_argument("--resize", type=float, default=1.0,
+                    help="resize")
+
 
 args = parser.parse_args()
 
 
-def separate_bg(img, er = 25, dil = 3):
-	filt_bg = GuidedFilter(np.mean(img, axis =2),  5, 1.0 / 65536.0**2)
+def separate_bg(img, er = 7, dil = 3):
+	filt_bg = GuidedFilter(img,  5, 1.0 / 65536.0**2)
 
 
 	bg = cv2.dilate(img, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (dil, dil)))
@@ -98,6 +107,11 @@ img16 = img16[:,:, 0:col]
 img = np.array(img16[:,:, 0:col], np.float32)
 img /= 65535.0
 
+if args.resize != 1.0:
+	img = cv2.resize(img, (0, 0), fy=args.resize, fx=args.resize,  interpolation=cv2.INTER_AREA)
+
+h, w, nchannels = img.shape
+
 if args.sigma == 0.0:
 	sigma = noise_level(img)
 	print("sigma", sigma * 65535.0)
@@ -105,79 +119,131 @@ if args.sigma == 0.0:
 else:
 	sigma = args.sigma / 65535.0
 
+print(img.shape)
 
 img[np.where(img < eps)] = eps
 
+zero = args.zero / 65535.0
 
-bw = np.mean(img, axis = 2)
-edges = cv2.Sobel(bw, cv2.CV_64FC1, 1, 0, ksize = 3) ** 2 + cv2.Sobel(bw, cv2.CV_64FC1, 0, 1, ksize = 3) ** 2
+l_channel = (img[:,:, 0] + img[:,:, 1] * 2 + img[:,:, 2]) / 4.0
+
+
+l_channel_z = np.clip(l_channel - zero, 0.0, 1.0 - sigma) + sigma
+cr_channel = (img[:,:, 0] - l_channel) / l_channel_z
+cb_channel = (img[:,:, 2] - l_channel) / l_channel_z
+
+edges = cv2.Sobel(l_channel, cv2.CV_64FC1, 1, 0, ksize = 3) ** 2 + cv2.Sobel(l_channel, cv2.CV_64FC1, 0, 1, ksize = 3) ** 2
 weights = 1/ (1 + edges / (sigma * args.edges) ** 2)
 #weight = cv2.GaussianBlur(weight, (5,5), 0)
+
+if args.color is not None:
+	img16 = tifffile.imread(args.color)
+	img16 = np.atleast_3d(img16)
+	ch, cw, cchannels = img16.shape
+	
+	ccol = [1,1,1,3,3][cchannels]
+	img16 = img16[:,:, 0:ccol]
+
+	cimg = np.array(img16[:,:, 0:col], np.float32)
+	cimg /= 65535.0
+	print(cimg.shape)
+	
+	cimg = cv2.resize(cimg, (w, h), interpolation=cv2.INTER_AREA)
+	if args.color_sigma == 0.0:
+		color_sigma = noise_level(cimg)
+		print("color_sigma", color_sigma * 65535.0)
+
+	else:
+		color_sigma = args.color_sigma / 65535.0
+	
+	cl_channel = np.mean(cimg, axis = 2)
+
+	cl_channel_z = np.clip(cl_channel - zero, 0.0, 1.0 - color_sigma) + color_sigma
+	cr_channel = (cimg[:,:, 0] - cl_channel) / cl_channel_z #** 1.2 / 3
+	cb_channel = (cimg[:,:, 2] - cl_channel) / cl_channel_z #** 1.2 / 3
+	print(cimg.shape)
 
 
 
 
 
 #weights = np.ones((h,w), dtype=np.float64)
-
+l_channel[np.where(l_channel < eps)] = eps
 
 r,s = args.gf1
 filt1 = None
 if r > 0:
-	filt1 = GuidedFilter(bw, r , (sigma * s) ** 2, weights)
-	img = filt1.filter(img)
-	img[np.where(img < eps)] = eps
+	filt1 = GuidedFilter(l_channel, r , (sigma * s) ** 2)
+	#img = img - cv2.Laplacian(img, 21) * 0.3
+	#l_channel = filt1.filter(l_channel)
+	l_channel[np.where(l_channel < eps)] = eps
+	
+	cr_channel = filt1.filter(cr_channel)
+	cb_channel = filt1.filter(cb_channel)
 
 
 if args.starproc:
 	img, stars = separate_bg(img)
 
-	stars = cv2.dilate(stars, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3,3)))
-	stars = cv2.erode(stars, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5,5)))
-	img += stars
+#	stars = cv2.dilate(stars, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3,3)))
+#	stars = cv2.erode(stars, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5,5)))
+#	img += stars
 
 
 
 #img = img - bg * 0.5
 
-img[np.where(img < args.zero / 65535.0 + eps)] = args.zero / 65535.0 + eps
+l_channel[np.where(l_channel < zero + eps)] = zero + eps
 
-img[np.where(img < eps)] = eps
+l_channel[np.where(l_channel < eps)] = eps
 
 r,s = args.gf2
 filt2 = None
 if r > 0:
-	filt2 = GuidedFilter(np.mean(img, axis = 2), r, (sigma * s) ** 2, weights)
+	filt2 = GuidedFilter(l_channel, r, (sigma * s) ** 2)
 
 
-img -= args.zero / 65535.0
+l_channel -= zero
 
 
-img[np.where(img < eps)] = eps
+l_channel[np.where(l_channel < eps)] = eps
 
 
 if args.outgamma > 0:
-	img = (img + sigma * args.sigmaeps) ** args.outgamma
+	l_channel = (l_channel + sigma * args.sigmaeps) ** args.outgamma
 	minval = (sigma * args.sigmaeps) ** args.outgamma
 	maxval = 0
 else:
-	img = np.log(img + sigma * args.sigmaeps)
+	l_channel = np.log(l_channel + sigma * args.sigmaeps)
 	minval = np.log(sigma * args.sigmaeps)
 	maxval = np.log(1.0)
 
-if filt2 is not None:
-	img = filt2.filter(img)
 
 
 if args.normalize:
-	bg = cv2.dilate(img, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5,5)))
+	bg = cv2.dilate(l_channel, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5,5)))
 	minbg = np.min(bg)
 
-	img[np.where(img<minbg)] = minbg
-	img = cv2.normalize(img, img, alpha = 0, beta = 65535, norm_type=cv2.NORM_MINMAX, dtype=cv2.CV_16UC3)
+	l_channel[np.where(l_channel<minbg)] = minbg
+	l_channel = cv2.normalize(l_channel, l_channel, alpha = 0, beta = 1, norm_type=cv2.NORM_MINMAX, dtype=cv2.CV_32FC1)
 else:
-	img = cv2.divide((img - minval), tuple([(maxval - minval) / 65535.0] * 4), dtype=cv2.CV_16UC3)
+	l_channel = cv2.divide((l_channel - minval), tuple([(maxval - minval) ] * 4), dtype=cv2.CV_32FC1)
 	print("minval", minval, "maxval", maxval)
+
+l_channel_er = cv2.erode(l_channel, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3,3)))
+l_channel = l_channel * (1.0 - l_channel) + l_channel_er * l_channel
+
+if filt2 is not None:
+	l_channel = filt2.filter(l_channel)
+
+
+
+img = cv2.merge((l_channel + cr_channel * l_channel / 2 , l_channel - (cr_channel + cb_channel) * l_channel / 2, l_channel +  cb_channel * l_channel / 2))
+
+
+img = np.clip(img * 65535.0, 0, 65535.0)
+img = np.array(img, dtype = np.uint16) 
+print("check img", cv2.minMaxLoc(img[:,:,1]))
 
 if args.outfile is not None:
 	tifffile.imsave(args.outfile, img)
