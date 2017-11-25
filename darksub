@@ -16,11 +16,19 @@ import sys
 from astro_utils import rawread, normalize, debayer, hp_filt_bayer, hp_filt_rgb, poly_bg, fit_images, combine_images
 
 
-def apply_flat(img, flats, coefs):
-	flat = np.zeros(img.shape, dtype=np.float32)
-	for i, f in enumerate(flats):
-		f = np.array(f, dtype=np.float32)
-		flat += f * coefs[i]
+def apply_flat(img, flats, coefs, log = False):
+	if log:
+		flat = np.ones(img.shape, dtype=np.float32)
+		for i, f in enumerate(flats):
+			f = np.array(f, dtype=np.float32)
+			flat *= f ** coefs[i]
+	else:
+		flat = np.zeros(img.shape, dtype=np.float32)
+		for i, f in enumerate(flats):
+			f = np.array(f, dtype=np.float32)
+			flat += f * coefs[i]
+
+	flat[np.where(flat <= 0)] = 1
 			
 	flat_bl_b = cv2.blur(flat[0::2, 0::2], (100, 100))
 	flat_bl_r = cv2.blur(flat[1::2, 1::2], (100, 100))
@@ -31,7 +39,6 @@ def apply_flat(img, flats, coefs):
 	max_g = (np.amax(flat_bl_g1) + np.amax(flat_bl_g2)) / 2.0
 	max_r = np.amax(flat_bl_r)
 	
-	flat[np.where(flat == 0)] = 1
 	mulmat = np.empty_like(flat)
 	mulmat[0::2, 0::2] = max_b / flat[0::2, 0::2]
 	mulmat[1::2, 1::2] = max_r / flat[1::2, 1::2]
@@ -147,33 +154,36 @@ if args.flat:
 		flat.append(f)
 
 if len(flat) > 0:
-#	img_hp = hp_filt_rgb(np.array(img, dtype=np.uint16))
+	log = False
+	if len(flat) == 1:
+		coefs = [1.0]
+	else:
+		img_f = cv2.pyrDown(img)
+		
+		flat_f = []
+		for f in flat:
+			ff = cv2.pyrDown(np.array(f, dtype = np.float32))
+			flat_f.append(ff)
 
-#	flat_hp = [[], [], []]
-#	for f in flat:
-#		flat_hp_rgb = hp_filt_rgb(f)
-#		for c in range(0,3):
-#			flat_hp[c].append(flat_hp_rgb[c])
+		mask, sigma = poly_bg(img_f, order = 3, scale = 1, erode = args.erode, it = args.iter, darkframes = flat_f, get_mask = True)
+		tifffile.imsave("mask.tif", mask)
+		
+		if log:
+			flat_f.append(np.ones_like(img_f) * 2)
+		
+			flat_f = np.log(np.clip(np.array(flat_f), 1e-12, 65536))
+			img_f = np.log(np.clip(img_f, 1e-12, 65536))
+		
+#		else:
+#			flat_f.append(np.ones_like(img_f))
+#			flat.append(np.ones_like(img))
 
-#	coefs = np.zeros((len(flat),))
-#	for c in range(0,3):
-#		print("fit", c)
-#		coefs_c, n = fit_images(flat_hp[c], img_hp[c], 10, kappa = 3)
-#		coefs += coefs_c / coefs_c.sum()
-
-	img_hp = cv2.pyrDown(img)
-	img_hp -= cv2.GaussianBlur(img_hp, (15,15), 0) * 0.9
-	flat_hp = []
-	for f in flat:
-		hpf = cv2.pyrDown(np.array(f, dtype = np.float32))
-		hpf -= cv2.GaussianBlur(hpf, (15,15), 0) * 0.9
-		flat_hp.append(hpf)
-	coefs, n = fit_images(flat_hp, img_hp, 10, kappa = 3)
+		coefs, n = fit_images(flat_f, img_f, 10, kappa = 3, mask = mask)
 
 
 	print(coefs)
 	
-	img = apply_flat(img, flat, coefs)
+	img = apply_flat(img, flat, coefs, log = log)
 	print(img.shape)
 		
 
