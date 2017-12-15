@@ -77,6 +77,10 @@ parser.add_argument("--reg4", type=float, default=[0.1], nargs = '+',
                     help="regularization4")
 parser.add_argument("--reg-lambda4", type=float, default=[2.0], nargs = '+',
                     help="lambda4")
+parser.add_argument("--regf", type=float, default=[0.1], nargs = '+',
+                    help="regularization flatten")
+parser.add_argument("--reg-lambdaf", type=float, default=[2.0], nargs = '+',
+                    help="lambda f")
 parser.add_argument("--lambda-eval-iter", type=int, default=1000,
                     help="stop updating lambda at iteration i")
 parser.add_argument("--reg-plus", type=float, default=1,
@@ -141,6 +145,10 @@ while len(args.reg4) < len(args.reg_lambda4):
 	args.reg4.append(args.reg4[-1])
 while len(args.reg_lambda4) < len(args.reg4):
 	args.reg_lambda4.append(args.reg_lambda4[-1])
+while len(args.regf) < len(args.reg_lambdaf):
+	args.regf.append(args.regf[-1])
+while len(args.reg_lambdaf) < len(args.regf):
+	args.reg_lambdaf.append(args.reg_lambdaf[-1])
 
 
 def normalize(img):
@@ -1022,25 +1030,28 @@ def up_dilate(img, r):
 	up = cv2.dilate(up, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (r,r)))
 	return cv2.pyrDown(up, dstsize = size)
 
-def mean_clip(src):
-	avg, stddev = cv2.meanStdDev(src)
-	for i in range(0, 3):
-		mask = cv2.compare(src, avg + stddev ** 2 * 4, cv2.CMP_LE)
-		avg, stddev = cv2.meanStdDev(src, mask=mask)
+def mean_clip2(src2):
+	avg = cv2.mean(src2)[0]
+	for i in range(0, 8):
+		print("avg", avg)
+		mask = cv2.compare(src2, float(avg) * 4, cv2.CMP_LE)
+		mask[src2 == 0.0] = 0
+		avg = cv2.mean(src2, mask=mask)[0]
 	
 	avg = float(avg)
-	print("mean_{}: {}".format(src.shape, avg))
+	print("mean_{}: {}".format(src2.shape, avg ** 0.5))
 	return avg
 
 
+def mean_clip(src):
+
+	avg2 = mean_clip2(src ** 2)
+	return avg2 ** 0.5
+
+
 class reg_pm_2:
-	def step1(self, res_a, l, m = None):
+	def step1(self, res_a, lm, m = None):
 		g = []
-		try:
-			l = np.pad(l, ((1, 1), (1, 1)), 'edge')
-			l = np.mean([l[:-1,:-1], l[:-1,1:], l[1:,:-1], l[1:,1:]], axis = 0)
-		except:
-			pass
 		
 		res = np.mean(res_a, axis = 0)
 		p_res = np.pad(res, ((1, 1), (1, 1)), 'edge')
@@ -1060,23 +1071,11 @@ class reg_pm_2:
 			
 		g = grad_xm ** 2 + grad_ym ** 2 + lap ** 2 * 2
 
-		##g /= l ** 2
-		#g = 1 / ( 1 + g ** 0.5) #!
-		##g = 1 / ( 1 + g)
-		#g = g / ( 1 + g)**2
-		#g = g**0.5 / ( 1 + g)
-		#g /= starprot
-
-		##g = cv2.medianBlur(g, 3)
-		#g = cv2.GaussianBlur(g, (3,3), 0)
-		#g = cv2.dilate(g, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3,3)))
-		
-		#g = l ** 2 / ((g ** 0.5 + l) * (g ** 0.5 + l / 10))
 		self.m = m
 		if self.m is None:
-			self.m = mean_clip(g)
+			self.m = mean_clip2(g)
 
-		l = l ** 2 * self.m
+		l = lm ** 2 * self.m
 		g = 1. / (1. + (g / l)) ** 2
 		g = cv2.GaussianBlur(g, (3,3), 0)
 		
@@ -1108,42 +1107,6 @@ class reg_pm_2:
 		del grad_yg2
 		return reg
 
-
-class reg_pm_4:
-	def __init__(self, size = 3):
-		self.size = size
-
-	def laplacian(self, img):
-		lap = cv2.GaussianBlur(img, (3,3), 0) - img
-		#lap = cv2.Laplacian(img, -1, ksize = self.size)
-		#if self.size > 3:
-		#	lap -= cv2.Laplacian(img, -1, ksize = self.size - 2)
-		return lap
-
-	def step1(self, res_a, l):
-		g = []
-		for res in res_a:
-			lap = cv2.GaussianBlur(res, (3,3), 0) - res
-			g.append(lap ** 2)
-		g = np.mean(g, axis = 0)
-
-		#g = l ** 2 / ((g ** 0.5 + l) * (g ** 0.5 + l / 10))
-		l = l ** 2 * mean_clip(g)
-
-		g = 1. / (1. + (g / l))
-		g = cv2.medianBlur(g, 3)
-		g = cv2.erode(g, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3,3)))
-		g = cv2.GaussianBlur(g, (3,3), 0)
-
-		#g = cv2.dilate(g, cv2.getStructuringElement(cv2.MORPH_CROSS, (3,3)))
-		cv2t.imshow("g4_%d" % self.size, normalize(g))
-		self.g = g
-
-	def step2(self, c):
-		lap = self.laplacian(c)
-		lap *= self.g
-		reg = - self.laplacian(lap)
-		return reg
 
 class Pyramid(object):
 	def __init__(self, depth = 3, reg = None, l = None):
@@ -1203,11 +1166,11 @@ class Pyramid(object):
 		return lp[::-1]
 
 	def collapse(self, pyr):
-		up = pyr[self.depth - 1] * self.reg[self.depth - 1]
+		up = pyr[self.depth - 1]
 		for i in range(self.depth - 2, -1, -1):
 			size = (pyr[i].shape[1], pyr[i].shape[0])
 			up = cv2.pyrUp(up, dstsize = size)
-			up = up + pyr[i] * self.reg[i]
+			up = up + pyr[i]
 		return up
 		
 
@@ -1216,31 +1179,29 @@ class reg_pm_2_pyr(Pyramid):
 		super(reg_pm_2_pyr, self).__init__(depth, reg, l)
 		self.m = [1] * self.depth
 	
-	def step1(self, res_a, l, eval_noise):
+	def step1(self, res_a, eval_noise):
 		
-		l = self.gaussian_pyr(l)
-	
 		gp = []
 		for res in res_a:
 			gp.append(self.gaussian_pyr(res))
 		
 		self.levels = []
-		for i, (img, ll, lm) in enumerate(zip(zip(*gp), l, self.l_mul)):
+		for i, (img, lm) in enumerate(zip(zip(*gp), self.l_mul)):
 			pm = reg_pm_2()
 			
 			if eval_noise:
-				pm.step1(img, ll * lm)
+				pm.step1(img, lm)
 				self.m[i] = pm.m
 			else:
-				pm.step1(img, ll * lm, self.m[i])
+				pm.step1(img, lm, self.m[i])
 			self.levels.append(pm)
 	
 	def step2(self, c):
 		gp = self.gaussian_pyr(c)
 		resp = []
-		for pm, img in zip(self.levels, gp):
+		for pm, img, r in zip(self.levels, gp, self.reg):
 			print(pm.gx.shape, img.shape)
-			resp.append(pm.step2(img))
+			resp.append(pm.step2(img) * r) 
 		
 		
 		return self.collapse(resp)
@@ -1252,8 +1213,7 @@ class reg_pyr(Pyramid):
 		super(reg_pyr, self).__init__(depth, reg, l)
 		self.m = [1] * self.depth
 	
-	def step1(self, res_a, l, eval_noise):
-		l = self.gaussian_pyr(l)
+	def step1(self, res_a, eval_noise):
 		
 		lps = []
 		res = np.mean(res_a, axis = 0)
@@ -1270,8 +1230,8 @@ class reg_pyr(Pyramid):
 			
 			g = np.mean(g, axis = 0)
 			if eval_noise:
-				self.m[i] = mean_clip(g)
-			lm = ((l[i] * self.l_mul[i]) ** 2) * self.m[i]
+				self.m[i] = mean_clip2(g)
+			lm = self.l_mul[i] ** 2 * self.m[i]
 
 			g = 1. / (1. + (g / lm) ** 1)
 			#if i == self.depth - 1:
@@ -1281,21 +1241,97 @@ class reg_pyr(Pyramid):
 
 			#g = cv2.dilate(g, cv2.getStructuringElement(cv2.MORPH_CROSS, (3,3)))
 		
+			cv2t.imshow("g_pyr_%d" % len(self.g_lp), g)
 			self.g_lp.append(g)
 		
-		for i, g in enumerate(self.g_lp):
-			cv2t.imshow("g_pyr_%d" % i, g)
 
 	def step2(self, c):
 		lp = self.laplacian_pyr(c)
 		reg_lp = []
 		for i in range(self.depth):
 			lp[i] *= self.g_lp[i]
-			reg_lp.append(lp[i] - cv2.GaussianBlur(lp[i], (3,3), 0))
+			reg_lp.append((lp[i] - cv2.GaussianBlur(lp[i], (3,3), 0))  * self.reg[i])
 			#-cv2.Laplacian(lp[i], -1, ksize = 3))
 		
 		
 		return self.collapse(reg_lp)
+
+
+
+class reg_pyr_flatten(Pyramid):
+	def __init__(self, depth = 3, reg = None, l = None):
+		super(reg_pyr_flatten, self).__init__(depth, reg, l)
+		self.m = [1] * self.depth
+	
+	def step1(self, res_a, eval_noise, weights = None):
+		
+		if weights is None:
+			weights = [1.0] * len(res_a)
+		lps = []
+		#res = np.mean(res_a, axis = 0)
+		for res_i in res_a:
+			lps.append(self.laplacian_pyr(res_i))
+			
+		self.g_lp = []
+		for i in range(self.depth):
+			g = []
+			g2 = []
+			for j in range(len(lps)):
+				lap = lps[j][i]
+				
+				g2.append(lap * lap * weights[j]**2)
+				g.append(lap * weights[j])
+				
+			
+			g2 = np.mean(g2, axis = 0)
+			g = np.mean(g, axis = 0)
+			
+			if eval_noise:
+				print(g2.shape)
+				self.m[i] = mean_clip2(g2)
+			
+			#g = g2
+			g = g * g
+			
+			lm = self.l_mul[i] ** 2 * self.m[i]
+
+			g = (g / lm) ** 0.5
+			g = g / (g + 1)
+			cv2t.imshow("g_flat_%d" % len(self.g_lp), 1.0 - g)
+			
+			g = 1.0 - g ** self.reg[i]
+			
+			self.g_lp.append(g)
+		
+
+	def step2(self, c):
+		lp = self.laplacian_pyr(c)
+		reg_lp = []
+		for i in range(self.depth):
+			lp[i] *= self.g_lp[i]
+			reg_lp.append(lp[i])
+		
+		
+		return self.collapse(reg_lp)
+
+
+def pyr_noise_level(img):
+	pyr = Pyramid(3)
+	img = np.array(img, dtype=np.float)
+	lp = pyr.laplacian_pyr(img)
+	
+	sigma2 = []
+	for l in lp:
+		sigma2.append(mean_clip2(l * l))
+	return np.sum(sigma2) ** 0.5
+
+
+def signal_level(img):
+	img = np.array(img, dtype=np.float)
+	avg, sigma = cv2.meanStdDev(cv2.blur(img, (5, 5)) - cv2.blur(img, (100, 100)))
+	sigma = float(sigma)
+	print("signal_level", sigma)
+	return sigma
 
 def bg_level(src):
 	res = cv2.blur(src, (3, 3))
@@ -1374,11 +1410,109 @@ def save_output(it = None):
 		del res_i
 	del res_ch
 
+def weighted_lin_fit(a, b, w):
+
+	ma = np.average(a, weights = w)
+	mb = np.average(b, weights = w)
+	print("weighted_lin_fit average ", ma, mb)
+	
+	sa = np.average((a - ma)**2, weights = w) ** 0.5
+	sb = np.average((b - mb)**2, weights = w) ** 0.5
+	cor = np.average((a - ma) * (b - mb), weights = w) / (sa * sb)
+	
+	m = cor * sb / sa
+	c = mb - m * ma
+	return m, c
+
+def histogram_weight(src, n = 50):
+	isrc = np.array(src * n, dtype=np.int)
+	isrc[isrc < 0] = 0
+	isrc[isrc >= n] = n - 1
+	hist, edges = np.histogram(isrc, bins=np.arange(n+1))
+	print("hist", hist)
+	m = max(np.median(hist), 1)
+	print(1.0 / (np.array(hist, dtype=np.float) + m))
+	histval = np.take(hist, isrc)
+	ret = 1.0 / (np.array(histval, dtype=np.float) + m)
+	return ret
+
+
+def AvgDev(img):
+	return np.mean(np.abs(img - np.median(img)))
+
+def MAD(img):
+	return np.median(np.abs(img - np.median(img)))
+
+def BVMV(img):
+	m = np.median(img)
+	mdif = np.abs(img - m)
+	Y = mdif / ( 9 * np.median(mdif))
+	mask = (Y < 1.0)
+	
+	Ym2 = Y[mask]**2
+	
+	ret = img.size * np.sum(mdif[mask]**2 * (1.0 - Ym2)**4) / np.abs(np.sum((1.0 - Ym2)*(1.0 - 5 * Ym2)))**2
+	return ret
+
+
+def gradient_dif_filter(dif, w, r):
+	difw = dif * w
+	difw = cv2.blur(difw, (int(r / 2), int(r / 2)))
+	mean_w = cv2.blur(w, (int(r / 2), int(r / 2)))
+
+	if np.amin(dif.shape) > r * 5:
+		dif = cv2.divide(difw, mean_w)
+		shape = dif.shape
+		resize_w = int((shape[1] + r - 1) / r)
+		resize_h = int((shape[0] + r - 1) / r)
+		dif = cv2.resize(dif, (resize_w, resize_h), interpolation=cv2.INTER_AREA)
+		dif = cv2.medianBlur(dif, 5)
+		dif = cv2.resize(dif, (shape[1], shape[0]), interpolation=cv2.INTER_LINEAR)
+		dif = cv2.blur(dif, (r, r))
+		dif = cv2.blur(dif, (r, r))
+	else:
+		difw = cv2.blur(difw, (r, r))
+		mean_w = cv2.blur(mean_w, (r, r))
+		difw = cv2.blur(difw, (r, r))
+		mean_w = cv2.blur(mean_w, (r, r))
+		difw = cv2.blur(difw, (r, r))
+		mean_w = cv2.blur(mean_w, (r, r))
+		dif = cv2.divide(difw, mean_w)
+
+	return dif
+
+
+def gradient_dif_filter2(dif, w, r):
+	h, w = dif.shape
+	resize_w = int((w + r - 1) / r)
+	resize_h = int((w + r - 1) / r)
+	res = np.empty((resize_h, resize_w), dtype = dif.dtype)
+	for i in range(0, resize_h):
+		y0 = np.clip(int((i - 1) * h / resize_h), 0, h - 1)
+		y1 = np.clip(int((i + 2) * h / resize_h), 0, h - 1)
+		for j in range(0, resize_w):
+			x0 = np.clip(int((j - 1) * w / resize_w), 0, w - 1)
+			x1 = np.clip(int((j + 2) * w / resize_w), 0, w - 1)
+			res[i, j] = np.median(dif[y0:y1, x0:x1])
+	res = cv2.resize(res, (w, h), interpolation=cv2.INTER_LINEAR)
+	res = cv2.blur(res, (r, r))
+	res = cv2.blur(res, (r, r))
+	res = cv2.blur(res, (r, r))
+
+
+	return res
+
+#########################################################################################################
+
 
 np.set_printoptions(precision=6, linewidth=160)
 
 src = []
 src_white = []
+src_sigma = []
+src_median = []
+src_signal_level = []
+
 psfsrc = []
 psfsrc_white = []
 imgidx = []
@@ -1408,6 +1542,7 @@ for f in args.outfile.split(','):
 	outchannels += nc
 
 outc_num = [0] * outchannels
+
 
 outc = 0
 for f in args.infile:
@@ -1466,6 +1601,12 @@ for f in args.infile:
 			src.append(img[:,:, c])
 			src_white.append(white)
 			weights.append(transp_c)
+			src_sigma.append(pyr_noise_level(img[:,:, c]))
+			if channels > col:
+				src_median.append(np.median(img[:,:, c][transp_c > 0]))
+			else:
+				src_median.append(np.median(img[:,:, c]))
+			src_signal_level.append(signal_level(img[:,:, c]))
 			
 			mv = np.amax(cv2.medianBlur(img[:,:, c], 3))
 			maxval.append(mv)
@@ -1479,13 +1620,31 @@ for f in args.infile:
 		imgidx.append(cidx)
 		transp.append(transp_c)
 
-
 exps = np.array(exps, dtype = np.float64)
 
 scales = 2.0 ** exps
 
 scales /= np.amax(scales)
 scales *= args.scale
+
+channel_scales = [1.0] * outchannels
+for c in range(0, len(scales)):
+	outc = outmap[c]
+	channel_scales[outc] *= scales[c]
+for outc in range(0, outchannels):
+	channel_scales[outc] **= 1.0 / outc_num[outc]
+
+print("channel_scales", channel_scales)
+
+channel_weights = [0.0] * outchannels
+
+for c in range(0, len(src)):
+	print("scale sigma", scales[c], src_sigma[c], scales[c] * src_sigma[c], src_signal_level[c])
+	outc = outmap[c]
+	channel_weights[outc] += (src_signal_level[c] / src_sigma[c]) ** 2
+
+channel_weights = np.array(channel_weights)** 0.5
+print("channel_weights", channel_weights)
 
 exp_clusters = cluster_exps(exps)
 
@@ -1569,6 +1728,7 @@ res = [None] * outchannels
 var = [1.0] * outchannels
 reg_prev = [None] * outchannels
 offset = [0.0] * outchannels
+hist_weight = [None] * outchannels
 kappa = 10.0
 
 try:
@@ -1576,7 +1736,7 @@ try:
 		f = open(args.load_psf, 'rb')
 		psf = pickle.load(f)
 		f.close()
-		for c in range(0, col):
+		for c in range(0, 3): #col):
 			cv2.imwrite("testpsf%d.tif" % (c), normalize(testPsf(psfsrc[c].shape, psf[c])))
 	else:
 		raise IOError
@@ -1604,7 +1764,7 @@ except:
 		f.close()
 
 for c in range(0, outchannels):
-	res[c] = cv2.GaussianBlur(s_res, (3,3), 0)
+	res[c] = cv2.GaussianBlur(s_res, (13,13), 0)
 
 res = np.array(res)
 
@@ -1612,8 +1772,9 @@ res = np.array(res)
 noise = noise_level(sum_src) + 0.00000001
 print("noise:", noise * 65535.0)
 
-reg1 = reg_pm_2_pyr(reg = args.reg2, l = args.reg_lambda2)
-reg2 = reg_pyr(reg = args.reg4, l = args.reg_lambda4)
+#reg1 = reg_pm_2_pyr(reg = args.reg2, l = args.reg_lambda2)
+#reg2 = reg_pyr(reg = args.reg4, l = args.reg_lambda4)
+reg3 = reg_pyr_flatten(reg = args.regf, l = args.reg_lambdaf)
 
 #for c in range(0, col):
 #	psf[c].interpolate(args.psf_filter_moffat_scale)
@@ -1643,6 +1804,7 @@ for i in range(0, it):
 	#starprot = np.mean([starprot[:-1,:-1], starprot[:-1,1:], starprot[1:,:-1], starprot[1:,1:]], axis = 0)
 	#cv2t.imshow("starprot", normalize(1.0/starprot))
 
+	setup = (i <= 3)
 
 	sum_w = np.zeros_like(res)
 	sum_corw = np.zeros_like(res)
@@ -1652,8 +1814,13 @@ for i in range(0, it):
 	dat_eps = 1.0 / args.robustness**4
 	
 	for outc in range(0, outchannels):
+		hist_weight[outc] = histogram_weight(res[outc])
+	
 		#offset[outc] = np.amin(res[outc]) * args.dering
-		offset[outc] = bg_level(res[outc]) * args.dering
+		if setup:
+			offset[outc] = 0.0
+		else:
+			offset[outc] = bg_level(res[outc]) * args.dering
 		res[outc] -= offset[outc]
 		res[outc][res[outc] <=0] = 0.0000000001
 	
@@ -1661,14 +1828,17 @@ for i in range(0, it):
 		if skipped[c]:
 			return
 		print("start2 %d %d" %(i,c))
-		kappa = (it - i) / it * 10 + 2
+		kappa = np.clip(3 - i, 0, 5) + 3
 		outc = outmap[c]
 
-		b_res = psf[c].apply(res[outc])
+		if setup:
+			b_res = np.array(res[outc])
+		else:
+			b_res = psf[c].apply(res[outc])
 		scaled_src = (np.array(src[c], dtype=np.float32) * scales[c] + args.zero * (1.0 - scales[c])) / src_white[c]
 
 		weight = np.empty_like(src[c], dtype=np.float32)
-		weight[:, :] = weights[c] / (scales[c] ** np.clip(i * 2.0 / it, 0.0, 1))
+		weight[:, :] = weights[c]
 		
 		gr = args.gradient_radius
 		w2 = cv2.blur(weight, (gr,gr)) / src_white[c]
@@ -1680,29 +1850,21 @@ for i in range(0, it):
 		where_over = np.where((src[c] > maxval[c] * args.overexp) & (scaled_src < b_res))
 		weight[where_over] /= 1.0 + (src[c][where_over] - maxval[c] * args.overexp) / (src_white[c] / 1000.0)
 		
-		scaled_src[np.where(weight == 0)] = args.zero / src_white[c]
-		scaled_src -= offset[outc]
+		scaled_src[weight == 0.0] = (src_median[c] * scales[c] + args.zero * (1.0 - scales[c])) / src_white[c]
+		scaled_src_orig = scaled_src
+		scaled_src = scaled_src_orig - offset[outc]
 		
 		dif = scaled_src - b_res
-		mean_w = 0.0000001 / (0.0000001 + dif * dif) * weight
 
 		gw = gradient_weight[c]
 		
-		dat = mean_w
+		print("noise_level", c, scales[c] * src_sigma[c])
+		weight /= src_white[c] * (scales[c] * src_sigma[c])**(2 * np.clip(i / 5.0, 0.0, 1))
+		dat = weight
 		
-		for ii in range(2):
-			difw = dif * dat
-			difw = cv2.blur(difw, (gr,gr))
-			difw = cv2.blur(difw, (gr,gr))
-			difw = cv2.blur(difw, (gr,gr))
-			difw = cv2.blur(difw, (gr,gr))
-		
-			mean_w = cv2.blur(mean_w, (gr,gr))
-			mean_w = cv2.blur(mean_w, (gr,gr))
-			mean_w = cv2.blur(mean_w, (gr,gr))
-			mean_w = cv2.blur(mean_w, (gr,gr))
-		
-			difw = cv2.divide(difw, mean_w)
+		nii = 1
+		for ii in range(nii):
+			difw = gradient_dif_filter2(dif, dat, gr)
 
 			src_hp = scaled_src - difw
 			cor_hp = cv2.divide(src_hp, b_res)
@@ -1714,15 +1876,18 @@ for i in range(0, it):
 			dat = dat * dat
 			
 		
-			if ii == 1:
+			if ii == nii - 1:
 				with lock:
 					var_next[outc] += dat
+					cv2t.imshow("var%d" % outc, dat / (var[outc] * kappa * kappa))
+					if c == 1:
+						cv2t.imshow("scaled_src%d" % c, normalize(np.clip(scaled_src_orig - 1010/65535.0,10/65535.0,1)** args.show_gamma))
 				clip = np.where(dat > var[outc] * kappa * kappa)
 				
 		
 			dat = (dat + dat_eps) ** -0.25
 		
-			dat *= weight / src_white[c]
+			dat *= weight
 		
 		dat[clip] = 0
 		
@@ -1731,22 +1896,21 @@ for i in range(0, it):
 		cor_psf = cor
 
 		
-		
-		del b_res
-		
-		try:
-			cor_mean = np.average(cor, weights = dat)
-		except:
-			cor_mean = 1.0
 		if outc_num[outc] > 1:
-			scales[c] /= cor_mean ** 0.5
+			cor_mean, b = weighted_lin_fit(cv2.blur(scaled_src_orig, (10, 10)), cv2.blur(b_res + offset[outc], (10, 10)), dat * hist_weight[outc])
+			#scales[c] *= cor_mean ** 0.5
 
-		with lock:
-			print("cor mean", cor_mean)
+			with lock:
+				print("cor mean %d %d" % (c, i), cor_mean)
 
+		del b_res
 
-		corw = psf[c].apply(cv2.multiply(dat, cor), flip = True)
-		w =  psf[c].apply(dat, flip = True)
+		if setup:
+			corw = cv2.multiply(dat, cor)
+			w = np.array(dat)
+		else:
+			corw = psf[c].apply(cv2.multiply(dat, cor), flip = True)
+			w =  psf[c].apply(dat, flip = True)
 		#cor = psf.apply(cor, flip = True)
 		corw[np.where(corw < 0.0)] = 0.0
 		w[np.where(w < 0.0)] = 0.0
@@ -1777,6 +1941,20 @@ for i in range(0, it):
 		print("end2 %d %d" %(i,c))
 	pfor.pfor(step2, list(range(0, col)) if i % 2 == 0 else reversed(list(range(0, col))))
 	
+
+	cur_channel_scales = [1.0] * outchannels
+	for c in range(0, len(scales)):
+		outc = outmap[c]
+		cur_channel_scales[outc] *= scales[c]
+	for outc in range(0, outchannels):
+		cur_channel_scales[outc] **= 1.0 / outc_num[outc]
+		cur_channel_scales[outc] = channel_scales[outc] / cur_channel_scales[outc]
+
+	print("cur_channel_scales", cur_channel_scales)
+	for c in range(0, len(scales)):
+		outc = outmap[c]
+		scales[c] *= cur_channel_scales[outc]
+
 	print("scales", scales)
 	
 	var = var_next
@@ -1792,10 +1970,9 @@ for i in range(0, it):
 		
 	cv2t.imshow("norm_w", norm_w / 10.0)
 
-	reg1.step1(res, norm_w ** 0, i < args.lambda_eval_iter)
-	#reg2 = reg_pm_4(size = 1)
-	#reg2.step1(res, args.reg_lambda * norm_w)
-	reg2.step1(res, norm_w ** 0, i < args.lambda_eval_iter)
+	#reg1.step1(res, i < args.lambda_eval_iter)
+	#reg2.step1(res, i < args.lambda_eval_iter)
+	reg3.step1(res, i < args.lambda_eval_iter, weights = channel_weights)
 
 	for outc in range(0, outchannels):
 		var[outc] /= outc_num[outc]
@@ -1807,7 +1984,7 @@ for i in range(0, it):
 	
 	
 		#reg_weight = args.reg * min(float(i) / (it * 0.3), 1)
-		reg = reg1.step2(res[outc]) + reg2.step2(res[outc])
+		reg = reg3.step2(res[outc])
 		print("check reg1", np.isnan(reg).any(), cv2.minMaxLoc(reg))
 		#print("check reg2", np.isnan(reg).any(), cv2.minMaxLoc(reg))
 
@@ -1861,7 +2038,8 @@ for i in range(0, it):
 		cor[np.where(cor > 100.)] = 100.
 		
 		res[outc] *= cor
-		res[outc] += reg
+		if not setup:
+			res[outc] += reg
 		
 		minVal, maxVal, minLoc, maxLoc = cv2.minMaxLoc(res[outc])
 		maxVal = min(maxVal, 1.0)
