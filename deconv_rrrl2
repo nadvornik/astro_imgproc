@@ -52,6 +52,9 @@ parser.add_argument("--tiles", type=int, default=4,
 parser.add_argument('--var-psf', action='store_true',
                     help="variable psf")
 
+parser.add_argument('--update-scales', action='store_true',
+                    help="update scales")
+
 parser.add_argument("--psf-filter-sigma-res", type=float, default=1.2,
                     help="psf filter")
 parser.add_argument("--psf-filter-sigma", type=float, default=0.5,
@@ -1388,8 +1391,9 @@ def mask_overlaps(m1, m2):
 	nz1 = np.count_nonzero(m1)
 	nz2 = np.count_nonzero(m2)
 	cross = np.count_nonzero(m1 * m2)
-	print('mask_overlap', nz1, nz2, cross)
-	return cross > min(nz1, nz2) * 0.8
+	ret = cross > min(nz1, nz2) * 0.8
+	print('mask_overlap', nz1, nz2, cross, ret)
+	return ret
 
 def cluster_overlap(exp_clusters, masks):
 	res = []
@@ -1406,7 +1410,7 @@ def cluster_overlap(exp_clusters, masks):
 			if not added:
 				res_clusters.append([c])
 				res_masks.append(masks[c])
-	res += res_clusters
+		res += res_clusters
 	return res
 
 
@@ -1923,7 +1927,7 @@ for i in range(0, it):
 		cor_psf = cor
 
 		
-		if outc_num[outc] > 1:
+		if outc_num[outc] > 1 and args.update_scales:
 			cor_mean, b = weighted_lin_fit(cv2.blur(scaled_src_orig, (10, 10)), cv2.blur(b_res + offset[outc], (10, 10)), dat * hist_weight[outc])
 			scales[c] *= cor_mean ** 0.5
 
