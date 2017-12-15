@@ -1384,6 +1384,31 @@ def cluster_exps(exps):
 	print(res)
 	return res
 		
+def mask_overlaps(m1, m2):
+	nz1 = np.count_nonzero(m1)
+	nz2 = np.count_nonzero(m2)
+	cross = np.count_nonzero(m1 * m2)
+	print('mask_overlap', nz1, nz2, cross)
+	return cross > min(nz1, nz2) * 0.8
+
+def cluster_overlap(exp_clusters, masks):
+	res = []
+	for cl in exp_clusters:
+		res_clusters = []
+		res_masks = []
+		for c in cl:
+			added = False
+			for i, m in enumerate(res_masks):
+				if mask_overlaps(m, masks[c]):
+					res_clusters[i].append(c)
+					added = True
+					break
+			if not added:
+				res_clusters.append([c])
+				res_masks.append(masks[c])
+	res += res_clusters
+	return res
+
 
 def save_output(it = None):
 	res_ch = []
@@ -1647,6 +1672,8 @@ channel_weights = np.array(channel_weights)** 0.5
 print("channel_weights", channel_weights)
 
 exp_clusters = cluster_exps(exps)
+exp_clusters = cluster_overlap(exp_clusters, weights)
+print('exp_clusters', exp_clusters)
 
 sum_src, sumweights = average_src(src, src_white, weights)
 
@@ -1898,7 +1925,7 @@ for i in range(0, it):
 		
 		if outc_num[outc] > 1:
 			cor_mean, b = weighted_lin_fit(cv2.blur(scaled_src_orig, (10, 10)), cv2.blur(b_res + offset[outc], (10, 10)), dat * hist_weight[outc])
-			#scales[c] *= cor_mean ** 0.5
+			scales[c] *= cor_mean ** 0.5
 
 			with lock:
 				print("cor mean %d %d" % (c, i), cor_mean)
