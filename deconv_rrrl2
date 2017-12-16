@@ -1526,14 +1526,18 @@ def gradient_dif_filter2(dif, weight, r):
 	resize_h = int((w + r - 1) / r)
 	res = np.empty((resize_h, resize_w), dtype = dif.dtype)
 	for i in range(0, resize_h):
-		y0 = np.clip(int((i - 1) * h / resize_h), 0, h - 1)
-		y1 = np.clip(int((i + 2) * h / resize_h), 0, h - 1)
 		for j in range(0, resize_w):
-			x0 = np.clip(int((j - 1) * w / resize_w), 0, w - 1)
-			x1 = np.clip(int((j + 2) * w / resize_w), 0, w - 1)
-			tile = dif[y0:y1, x0:x1]
-			tile_w = weight[y0:y1, x0:x1]
-			res[i, j] = np.median(tile[tile_w > 0])
+			for s in range(1, w):
+				y0 = np.clip(int((i - s) * h / resize_h), 0, h - 1)
+				y1 = np.clip(int((i + 1 + s) * h / resize_h), 0, h - 1)
+				x0 = np.clip(int((j - s) * w / resize_w), 0, w - 1)
+				x1 = np.clip(int((j + 1 + s) * w / resize_w), 0, w - 1)
+				tile = dif[y0:y1, x0:x1]
+				tile_w = weight[y0:y1, x0:x1]
+				tile_m = tile[tile_w > 0]
+				if len(tile_m) > 0:
+					break
+			res[i, j] = np.median(tile_m)
 	res = cv2.resize(res, (w, h), interpolation=cv2.INTER_LINEAR)
 	res = cv2.blur(res, (r, r))
 	res = cv2.blur(res, (r, r))
