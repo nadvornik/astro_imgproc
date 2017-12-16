@@ -856,7 +856,8 @@ class TilePsf:
 					eul = (max(0, y - tile_overlap_e), max(0, x - tile_overlap_e))
 					elr = (min(y + tile_size_h + tile_overlap_e, h), min(x + tile_size_w + tile_overlap_e, w))
 				
-					t_ptlist = [ (py - eul[0], px - eul[1], v, hfr, mask, low) for py, px, v, hfr, mask, low in ptlist if py >= eul[0] and px >= eul[1] and py < elr[0] and px < elr[1] ]
+					t_ptlist = [ (py - eul[0], px - eul[1], v, hfr, mask, low) for py, px, v, hfr, mask, low in ptlist 
+							if py >= eul[0] + args.diameter and px >= eul[1] + args.diameter and py < elr[0] - args.diameter and px < elr[1] - args.diameter ]
 					if len(t_ptlist) > stars_tile:
 						break
 					if eul == (0,0) and elr == (h,w):
