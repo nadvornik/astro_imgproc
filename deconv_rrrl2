@@ -426,7 +426,7 @@ def rrrl_simple(src, psf, it):
 		
 		src[i] -= minVal - psf_zero
 		scales[i] = 1 / (maxVal + 0.00000000001 - minVal) 
-		weights[i] = (maxVal - minVal) ** 0.5
+		weights[i] = (maxVal - minVal) ** 2
 		
 		
 	src = np.atleast_3d(src)
@@ -456,13 +456,13 @@ def rrrl_simple(src, psf, it):
 		clip = np.where(dat > (var * kappa**2)[None, :, :])
 		
 		
-		dat = (dat + 1.0 / 1000.0**4) ** -0.25 * weights[:, None, None]
+		dat = (dat + 1.0 / 10000.0**4) ** -0.25 * weights[:, None, None]
 		
 		dat[clip] = 0.0
 		
 		for c in range(0, len(src)):
-			cor_mean = np.average(cor[c], weights = dat[c] + 0.0000001)
-			scales[c] /= cor_mean
+			#cor_mean = np.average(cor[c], weights = dat[c] + 0.0000001)
+			#scales[c] /= cor_mean
 
 			corw = psf.apply(cv2.multiply(dat[c], cor[c]), flip = True)
 			w =  psf.apply(dat[c], flip = True)
@@ -492,7 +492,7 @@ class PsfGauss:
 		return cv2.GaussianBlur(img, (self.size, self.size), self.sigma)
 
 class PsfMoffat:
-	def __init__(self, size, alpha = 1, beta=4.765, ring=10, ring_s = 1, psf = None, residual = None):
+	def __init__(self, size, alpha = 1, beta=4.765, psf = None, residual = None):
 		self.size = size
 		self.mx = (size - 1) / 2.0
 		self.my = (size - 1) / 2.0
@@ -500,107 +500,84 @@ class PsfMoffat:
 		if psf is not None:
 			self.fit(psf, residual)
 		else:
-			self.set(alpha, beta, ring, ring_s)
+			self.set(alpha, beta)
+
+	def show(self, name, psf, residual, moffat):
+		h = 4
+		w = len(psf)
+		img = np.zeros((h * self.size, w * self.size), dtype = np.uint8)
+		def show1(x, y, i1):
+			img[y * self.size : (y+1) * self.size, x * self.size : (x+1) * self.size] = normalize(i1)
+		
+		for i in range(0, w):
+			show1(i, 0, residual[i] ** 0.4)
+			show1(i, 1, psf[i] ** 0.4)
+			show1(i, 2, moffat[i] ** 0.4)
+			show1(i, 3, psf[i] - moffat[i]) 
+		img = cv2.resize(img, (img.shape[1] * 2, img.shape[0] * 2), interpolation=cv2.INTER_NEAREST)
+		cv2t.imshow(name, img)
 
 	def fit(self, psf, residual = None):
 		r2 = np.array([[ (x - self.mx) ** 2 + (y - self.my) ** 2 for x in range(0, self.size)] for y in range(0, self.size)])
-	
-		def moffat2d(yx, alpha, beta, mag, shift):
-			y, x = yx
+		psf = np.array(psf)
+		def moffat2d(syx, alpha, beta, *magshift):
+			s, y, x = syx
 			#print(alpha, beta, mag, shift)
 			moffat = (1 + (r2 / (alpha * alpha))) ** -beta
-			if residual is not None:
-				moffat = cv2.filter2D(residual, -1, moffat)
-			#cv2t.imshow("iter", normalize(moffat ** 0.4))
-			ret = shift + mag * moffat[x, y]
+			ret = np.empty_like(psf)
+			for i in range(0, len(psf)):
+				#if residual is not None:
+				moffat_i = cv2.filter2D(residual[i], -1, moffat)
+				mag = magshift[2 * i]
+				shift = magshift[2 * i + 1]
+				ret[i] = shift + mag * moffat_i
 			#print(ret)
-			return ret
+			return ret[(s, y, x)]
 
-		cv2t.imshow("src", normalize(psf ** 0.4))
-		if residual is not None:
-			cv2t.imshow("residual", normalize(residual ** 0.4))
+#		cv2t.imshow("src", normalize(psf ** 0.4))
+#		if residual is not None:
+#			cv2t.imshow("residual", normalize(residual ** 0.4))
+		slices = len(psf)
 
 		x0 = np.arange(self.size)
 		y0 = np.arange(self.size)
-		y, x = np.meshgrid(y0, x0)
-		yx = (y.ravel(), x.ravel())
-		z = psf.ravel() * 1000.0
+		s0 = np.arange(slices)
+		s, y, x = np.meshgrid(s0, y0, x0, indexing='ij')
+		syx = (s.ravel(), y.ravel(), x.ravel())
+		s, y, x = syx
+		z = psf[syx] * 1000.0
 
 		shift = np.amin(z)
 		mag = np.amax(z) - shift
 		
+		min_alpha = (args.psf_filter_sigma - args.psf_filter_sigma_res) * 2
+		
 		try:
-			popt, pcov = curve_fit(moffat2d, yx, z, p0 = [1, 5, mag, shift], bounds = ([0.01, 1, 0, 0], [4.0, 10, np.inf, np.inf]), loss='soft_l1', verbose = 1, xtol=1e-12, ftol=1e-12, gtol=1e-12, jac = '3-point')
+			popt, pcov = curve_fit(moffat2d, syx, z, p0 = [3, 5] + [mag, shift] * slices, bounds = ([min_alpha, 1] + [0, 0] * slices, [4.0, 10] + [np.inf, np.inf] * slices), loss='soft_l1', verbose = 1, xtol=1e-12, ftol=1e-12, gtol=1e-12, jac = '3-point')
 			print ("fit1a", popt)
-			sigma = z - moffat2d(yx, *popt)
+			sigma = z - moffat2d(syx, *popt)
 			ss = np.median(sigma ** 2) ** 0.5 * 0.2
 			sigma[np.where(sigma < ss)] = ss
-			popt, pcov = curve_fit(moffat2d, yx, z, p0 = popt, bounds = ([0.01, 1, 0, 0], [4.0, 10, np.inf, np.inf]), loss='soft_l1', verbose = 1, xtol=1e-12, ftol=1e-12, gtol=1e-12, jac = '3-point', sigma = sigma)
+			popt, pcov = curve_fit(moffat2d, syx, z, p0 = popt, bounds = ([0.01, 1] + [ 0, 0] * slices, [4.0, 10] + [np.inf, np.inf] * slices), loss='soft_l1', verbose = 1, xtol=1e-12, ftol=1e-12, gtol=1e-12, jac = '3-point', sigma = sigma)
 			print ("fit1b", popt)
-			sigma = z - moffat2d(yx, *popt)
-			cv2t.imshow("dif1", normalize(np.reshape(sigma, psf.shape)))
+			
+			self.show("fit2", psf * 1000.0, residual, moffat2d(syx, *popt).reshape(psf.shape))
 
 		except  Exception as e:
 			print(e)
-			popt = [1.0, 4.765, mag, shift]
+			popt = [1.0, 4.765]
 		self.set(popt[0], popt[1])
 
-	def fit2(self, psf, residual = None):
-		r2 = np.array([[ (x - self.mx) ** 2 + (y - self.my) ** 2 for x in range(0, self.size)] for y in range(0, self.size)])
-	
-		def moffat2d(xy, alpha, ring, ring_s, mag, shift):
-			beta = self.beta
-			y, x = yx
-			#print(alpha, beta, mag, shift)
-			moffat = (1 + (r2 / (alpha * alpha))) ** -beta * (1.0 - 1.0 / (1 + (r2 ** 0.5 * ring_s - ring)**4))
-			if residual is not None:
-				moffat = cv2.filter2D(residual, -1, moffat)
-			#cv2t.imshow("iter", normalize(moffat ** 0.4))
-			ret = shift + mag * moffat[x, y]
-			#print(ret)
-			return ret
-
-		cv2t.imshow("src", normalize(psf ** 0.4))
-		if residual is not None:
-			cv2t.imshow("residual", normalize(residual ** 0.4))
-
-		x0 = np.arange(self.size)
-		y0 = np.arange(self.size)
-		y, x = np.meshgrid(y0, x0)
-		yx = (y.ravel(), x.ravel())
-		z = psf.ravel() * 1000.0
-
-		shift = np.amin(z)
-		mag = np.amax(z) - shift
-		
-		try:
-			popt, pcov = curve_fit(moffat2d, yx, z, p0 = [1, 2, 1, mag, shift], bounds = ([0.01, 2, 1, 0, 0], [4.0, np.inf, np.inf, np.inf, np.inf]), loss='soft_l1', verbose = 1, xtol=1e-12, ftol=1e-12, gtol=1e-12, jac = '3-point')
-			print ("fit2a", popt)
-			sigma = z - moffat2d(yx, *popt)
-			ss = np.median(sigma ** 2) ** 0.5 * 0.2
-			sigma[np.where(sigma < ss)] = ss
-			popt, pcov = curve_fit(moffat2d, yx, z, p0 = popt, bounds = ([0.01, 2, 1, 0, 0], [4.0, np.inf, np.inf, np.inf, np.inf]), loss='soft_l1', verbose = 1, xtol=1e-12, ftol=1e-12, gtol=1e-12, jac = '3-point', sigma = sigma)
-			print ("fit2b", popt)
-			sigma = z - moffat2d(yx, *popt)
-			cv2t.imshow("dif2", normalize(np.reshape(sigma, psf.shape)))
-		except  Exception as e: 
-			print(e)
-			popt = [1.0, 0, 0, mag, shift]
-		self.set(popt[0], self.beta, popt[1], popt[2])
 
 
 
-	def set(self, alpha, beta, ring = 0, ring_s = 0):
+	def set(self, alpha, beta):
 		self.alpha = alpha
 		self.beta = beta
-		self.ring = ring
-		self.ring_s = ring_s
 		
 		r2 = np.array([[((x - self.mx) **2 + (y - self.my)**2) for x in range(self.size) ] for y in range(self.size) ], dtype=np.float)
 		
 		self.psf = (1 + r2 / (alpha **2 )) ** -beta
-		if ring_s > 0:
-			self.psf *= (1.0 - 1.0 / (1 + (r2 ** 0.5 * ring_s - ring)**4))
 
 		cv2t.imshow("moffat", normalize(self.psf ** 0.4))
 	
@@ -609,18 +586,10 @@ class PsfMoffat:
 	def interpolate(self, s):
 		if s < 0.01:
 			s = 0.01
-		return PsfMoffat(self.size, self.alpha * s ** 0.5, self.beta, self.ring, self.ring_s)
+		return PsfMoffat(self.size, self.alpha * s ** 0.5, self.beta)
 	
 	def apply(self, img, flip = False):
 		return cv2.filter2D(img, -1, self.psf)
-
-def moffat_mean(moffat_list):
-	beta = [p.beta for p in moffat_list]
-	print("beta", beta)
-	beta = np.median(beta)
-	print("med", beta)
-	for p in moffat_list:
-		p.set(p.alpha, beta, p.ring, p.ring_s)
 
 
 class Psf:
@@ -713,16 +682,10 @@ class Psf:
 			psf[args.diameter, args.diameter] += 1
 		cv2t.imshow("psf2" , normalize(psf ** 0.4))
 			
-		self.base_psf = psf
-			
 		self.target = np.mean(psflist, axis = 0)
 		#target = cv2.erode(target, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3,3)))
 		self.residual = cv2.GaussianBlur(psf, (args.diameter * 2 + 1, args.diameter * 2 + 1), args.psf_filter_sigma_res)
 		#residual = cv2.dilate(residual, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3,3)))
-		
-		self.moffat = PsfMoffat(args.diameter * 2 + 1, psf = self.target, 
-				residual = self.residual)
-		psf = self.moffat.apply(psf)
 		
 		cv2t.imshow("srcfit" , normalize(psf ** 0.4))
 		
@@ -730,28 +693,6 @@ class Psf:
 		
 		self.set(psf)
 		#cv2t.imshow("psf%d" % id(self) , normalize(self.psf ** 0.5))
-	
-	def fit2(self):
-		self.moffat.fit2(self.target, self.residual)
-		psf = self.moffat.apply(self.base_psf)
-		cv2t.imshow("srcfit2" , normalize(psf ** 0.4))
-
-		self.set(psf)
-	
-	def interpolate(self, s):
-		if self.updated:
-			return
-		try:
-			moffat = self.moffat
-			#s = 1.0 - np.clip(s, 0, 1)
-			#moffat_i = self.moffat.interpolate(s)
-			#psf = moffat.apply(self.base_psf) + self.base_psf - moffat_i.apply(self.base_psf)
-			moffat = self.moffat.interpolate(s)
-			psf = moffat.apply(self.base_psf)
-			self.set(psf)
-			cv2t.imshow("moffat", normalize(self.psf ** 0.4))
-		except:
-			pass
 	
 	def gaussian(self, img, sigma):
 		psf = np.zeros((args.diameter * 2 + 1, args.diameter * 2 + 1), dtype=np.float64)
@@ -931,11 +872,11 @@ class TilePsf:
 					psf.from_psflist(psflist, psf_filter_sigma)
 					self.tiles.append((psf, ul, lr, eul_mo, elr_mo))
 
-		moffat_mean([t[0].moffat for t in self.tiles])
-		for t in self.tiles:
-			t[0].fit2()
+		target_psf = [t[0].target for t in self.tiles]
+		residual = [t[0].residual for t in self.tiles]
 
-		#print(self.tiles)
+		self.moffat_base = PsfMoffat(args.diameter * 2 + 1, psf = target_psf, residual = residual)
+		self.moffat = self.moffat_base
 
 	def gaussian(self, img, sigma):
 		
@@ -978,6 +919,8 @@ class TilePsf:
 			#mask[eul[0] : elr[0], eul[1]: elr[1]] += t_mask
 			#cv2t.imshow("tile", mask)
 			#cv2t.waitKey(0)
+
+		self.moffat.apply(res)
 		return res
 		
 	def update(self, cor_psf, dat, res):
@@ -992,8 +935,7 @@ class TilePsf:
 			psf.update(t_cor_psf, t_dat, t_res)
 	
 	def interpolate(self, s):
-		for psf, ul, lr, eul, elr in self.tiles:
-			psf.interpolate(s)
+		self.moffat = self.moffat_base.interpolate(s)
 
 	def hfr(self):
 		hfrlist = []
