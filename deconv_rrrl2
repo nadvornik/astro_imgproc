@@ -1346,18 +1346,27 @@ def bg_level(src):
 	return res
 
 def average_src(src, white, weights = None):
-	sum_src = 0.0
-	sum_weights = 0.001
+	sum_src = np.zeros_like(src[0], dtype = np.float32)
+	sum_weights = np.zeros_like(src[0], dtype = np.float32)
 	
 	if weights is None:
 		weights = [1.0] * len(src)
 	
+	gr = args.diameter * 2 + 1
+	
 	for i in range(0, len(src)):
 		s = np.array(src[i], dtype = np.float32)
 		w = np.array(weights[i], dtype = np.float32)
-		sum_src = sum_src + s / white[i] * w
-		sum_weights = sum_weights + w
-	res = sum_src / sum_weights
+		w2 = cv2.blur(w, (gr, gr))
+		w2 = cv2.blur(w2, (gr, gr))
+		w2 *= w2
+		w *= w2
+		del w2
+
+		sum_src += s / white[i] * w
+		sum_weights += w
+
+	res = cv2.divide(sum_src, sum_weights)
 	res[np.where(sum_weights <= 0.001)] = args.zero / white[0]
 	return res, sum_weights
 
@@ -1511,7 +1520,7 @@ def gradient_dif_filter(dif, w, r):
 	return dif
 
 
-def gradient_dif_filter2(dif, w, r):
+def gradient_dif_filter2(dif, weight, r):
 	h, w = dif.shape
 	resize_w = int((w + r - 1) / r)
 	resize_h = int((w + r - 1) / r)
@@ -1522,7 +1531,9 @@ def gradient_dif_filter2(dif, w, r):
 		for j in range(0, resize_w):
 			x0 = np.clip(int((j - 1) * w / resize_w), 0, w - 1)
 			x1 = np.clip(int((j + 2) * w / resize_w), 0, w - 1)
-			res[i, j] = np.median(dif[y0:y1, x0:x1])
+			tile = dif[y0:y1, x0:x1]
+			tile_w = weight[y0:y1, x0:x1]
+			res[i, j] = np.median(tile[tile_w > 0])
 	res = cv2.resize(res, (w, h), interpolation=cv2.INTER_LINEAR)
 	res = cv2.blur(res, (r, r))
 	res = cv2.blur(res, (r, r))
