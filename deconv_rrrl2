@@ -521,7 +521,7 @@ class PsfMoffat:
 		r2 = np.array([[ (x - self.mx) ** 2 + (y - self.my) ** 2 for x in range(0, self.size)] for y in range(0, self.size)])
 		psf = np.array(psf)
 		def moffat2d(syx, alpha, beta, *magshift):
-			s, y, x = syx
+			#s, y, x = syx
 			#print(alpha, beta, mag, shift)
 			moffat = (1 + (r2 / (alpha * alpha))) ** -beta
 			ret = np.empty_like(psf)
@@ -532,7 +532,7 @@ class PsfMoffat:
 				shift = magshift[2 * i + 1]
 				ret[i] = shift + mag * moffat_i
 			#print(ret)
-			return ret[(s, y, x)]
+			return ret.ravel()#[(s, y, x)]
 
 #		cv2t.imshow("src", normalize(psf ** 0.4))
 #		if residual is not None:
@@ -641,7 +641,7 @@ class Psf:
 		bl_psf = cv2.GaussianBlur(bl_psf, (3, 3), 0)
 		
 		y, x = np.ogrid[-args.diameter:args.diameter + 1, -args.diameter:args.diameter + 1]
-		r = np.array((x * x + y * y) ** 0.5 / args.diameter, dtype = np.float32) ** 2
+		r = np.array((x * x + y * y) ** 0.5 / args.diameter, dtype = np.float32) ** 2 / 4
 		
 		minVal, maxVal, minLoc, maxLoc = cv2.minMaxLoc(bl_psf)
 		
