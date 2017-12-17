@@ -520,7 +520,10 @@ class PsfMoffat:
 	def fit(self, psf, residual = None):
 		r2 = np.array([[ (x - self.mx) ** 2 + (y - self.my) ** 2 for x in range(0, self.size)] for y in range(0, self.size)])
 		psf = np.array(psf)
-		def moffat2d(syx, alpha, beta, *magshift):
+		
+		A = np.ones((psf.shape[1] * psf.shape[2], 2))
+		
+		def moffat2d(syx, alpha, beta):
 			#s, y, x = syx
 			#print(alpha, beta, mag, shift)
 			moffat = (1 + (r2 / (alpha * alpha))) ** -beta
@@ -528,15 +531,13 @@ class PsfMoffat:
 			for i in range(0, len(psf)):
 				#if residual is not None:
 				moffat_i = cv2.filter2D(residual[i], -1, moffat)
-				mag = magshift[2 * i]
-				shift = magshift[2 * i + 1]
-				ret[i] = shift + mag * moffat_i
+				A[:, 0] = moffat_i.ravel()
+				m, c = np.linalg.lstsq(A, psf[i].ravel())[0]
+				ret[i] = c + m * moffat_i
 			#print(ret)
+			ret *= 1000.0
 			return ret.ravel()#[(s, y, x)]
 
-#		cv2t.imshow("src", normalize(psf ** 0.4))
-#		if residual is not None:
-#			cv2t.imshow("residual", normalize(residual ** 0.4))
 		slices = len(psf)
 
 		x0 = np.arange(self.size)
@@ -547,22 +548,19 @@ class PsfMoffat:
 		s, y, x = syx
 		z = psf[syx] * 1000.0
 
-		shift = np.amin(z)
-		mag = np.amax(z) - shift
-		
 		min_alpha = (args.psf_filter_sigma - args.psf_filter_sigma_res) * 2
 		
 		try:
-			popt, pcov = curve_fit(moffat2d, syx, z, p0 = [3, 5] + [mag, shift] * slices, bounds = ([min_alpha, 1] + [0, 0] * slices, [4.0, 10] + [np.inf, np.inf] * slices), loss='soft_l1', verbose = 1, xtol=1e-12, ftol=1e-12, gtol=1e-12, jac = '3-point')
+			popt, pcov = curve_fit(moffat2d, syx, z, p0 = [3, 5], bounds = ([min_alpha, 1], [4.0, 10]), loss='soft_l1', verbose = 1, xtol=1e-12, ftol=1e-12, gtol=1e-12, jac = '3-point')
 			print ("fit1a", popt)
+			self.show("fit2", psf * 1000.0, residual, moffat2d(syx, *popt).reshape(psf.shape))
 			sigma = z - moffat2d(syx, *popt)
 			ss = np.median(sigma ** 2) ** 0.5 * 0.2
 			sigma[np.where(sigma < ss)] = ss
-			popt, pcov = curve_fit(moffat2d, syx, z, p0 = popt, bounds = ([0.01, 1] + [ 0, 0] * slices, [4.0, 10] + [np.inf, np.inf] * slices), loss='soft_l1', verbose = 1, xtol=1e-12, ftol=1e-12, gtol=1e-12, jac = '3-point', sigma = sigma)
+			popt, pcov = curve_fit(moffat2d, syx, z, p0 = popt, bounds = ([0.01, 1], [4.0, 10]), loss='soft_l1', verbose = 1, xtol=1e-12, ftol=1e-12, gtol=1e-12, jac = '3-point', sigma = sigma)
 			print ("fit1b", popt)
 			
 			self.show("fit2", psf * 1000.0, residual, moffat2d(syx, *popt).reshape(psf.shape))
-
 		except  Exception as e:
 			print(e)
 			popt = [1.0, 4.765]
