@@ -121,6 +121,10 @@ parser.add_argument("--scale", type=float, default=1,
 parser.add_argument("--zero", type=float, default=1024,
                     help="zero level")
 
+
+parser.add_argument("--wb", type=float, default=[1.0], nargs = '+',
+                    help="white balance")
+
 parser.add_argument("--show-gamma", type=float, default=0.1,
                     help="display gamma")
 
@@ -1367,7 +1371,8 @@ def cluster_overlap(exp_clusters, masks):
 def save_output(it = None):
 	res_ch = []
 	for outc in range(0, outchannels):
-		res_ch.append(cv2.multiply(res[outc], 65535.0, dtype = cv2.CV_16UC1))
+		res_wb = res[outc] * white_balance[outc] + args.zero / 65535.0 * (1.0 - white_balance[outc])
+		res_ch.append(cv2.multiply(res_wb, 65535.0, dtype = cv2.CV_16UC1))
 
 	outidx = 0
 	for i, fn in enumerate(outfiles):
@@ -1611,6 +1616,11 @@ scales = 2.0 ** exps
 
 scales /= np.amax(scales)
 scales *= args.scale
+
+white_balance = [1.0] * outchannels
+for i, wb in enumerate(args.wb):
+	white_balance[i] = wb
+print("white balance", white_balance)
 
 channel_scales = [1.0] * outchannels
 for c in range(0, len(scales)):
