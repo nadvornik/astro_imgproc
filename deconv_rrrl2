@@ -832,8 +832,11 @@ class VarPsf:
 
 
 class TilePsf:
-	def extract(self, img, ptlist, psf_filter_sigma):
+	def extract(self, img, ptlist, psf_filter_sigma, mask = None):
 		self.shape = img.shape
+		
+		if mask is not None and np.array(mask).size <= 1:
+			mask = None
 		
 		stars_tile = len(ptlist) / args.tiles ** 2
 		print("stars per tile", stars_tile)
@@ -846,6 +849,7 @@ class TilePsf:
 		self.tile_overlap = tile_overlap
 		
 		self.tiles = []
+		self.sparse = False
 		for y in range(0, h, tile_size_h):
 			for x in range(0, w, tile_size_w):
 				ul = (y, x)
@@ -854,12 +858,21 @@ class TilePsf:
 				tile_overlap_e = tile_overlap
 				eul_mo = (max(0, y - tile_overlap), max(0, x - tile_overlap))
 				elr_mo = (min(y + tile_size_h + tile_overlap, h), min(x + tile_size_w + tile_overlap, w))
+				if mask is not None and np.count_nonzero(mask[ul[0] : lr[0], ul[1]: lr[1]]) == 0:
+					self.tiles.append((None, ul, lr, eul_mo, elr_mo))
+					self.sparse = True
+					continue
 				while True:
 					eul = (max(0, y - tile_overlap_e), max(0, x - tile_overlap_e))
 					elr = (min(y + tile_size_h + tile_overlap_e, h), min(x + tile_size_w + tile_overlap_e, w))
 				
-					t_ptlist = [ (py - eul[0], px - eul[1], v, hfr, mask, low) for py, px, v, hfr, mask, low in ptlist 
-							if py >= eul[0] + args.diameter and px >= eul[1] + args.diameter and py < elr[0] - args.diameter and px < elr[1] - args.diameter ]
+					t_ptlist = []
+					for  py, px, v, hfr, m, low in ptlist:
+						if (py >= eul[0] + args.diameter and px >= eul[1] + args.diameter and py < elr[0] - args.diameter -1 and px < elr[1] - args.diameter -1
+						        and  ( mask is None or
+						          np.count_nonzero(mask[int(py) - args.diameter: int(py) + args.diameter + 1, int(px) - args.diameter: int(px) + args.diameter + 1]) == (args.diameter * 2 + 1)**2 )):
+							t_ptlist.append((py - eul[0], px - eul[1], v, hfr, m, low))
+				
 					if len(t_ptlist) > stars_tile:
 						break
 					if eul == (0,0) and elr == (h,w):
@@ -875,8 +888,9 @@ class TilePsf:
 					psf.from_psflist(psflist, psf_filter_sigma)
 					self.tiles.append((psf, ul, lr, eul_mo, elr_mo))
 
-		target_psf = [t[0].target for t in self.tiles]
-		residual = [t[0].residual for t in self.tiles]
+		print(self.tiles)
+		target_psf = [t[0].target for t in self.tiles if t[0] is not None]
+		residual = [t[0].residual for t in self.tiles if t[0] is not None]
 
 		self.moffat_base = PsfMoffat(args.diameter * 2 + 1, psf = target_psf, residual = residual)
 		self.moffat = self.moffat_base
@@ -892,6 +906,7 @@ class TilePsf:
 		self.tile_overlap = tile_overlap
 		
 		self.tiles = []
+		self.sparse = False
 		for y in range(0, h, tile_size_h):
 			for x in range(0, w, tile_size_w):
 				ul = (y, x)
@@ -911,18 +926,25 @@ class TilePsf:
 	
 	
 		res = np.zeros_like(img)
-		#mask = np.zeros_like(img)
+		if self.sparse:
+			mask = np.zeros_like(img)
 		
 		for psf, ul, lr, eul, elr in self.tiles:
+			if psf is None:
+				continue
 			t_res = psf.apply(img[eul[0] : elr[0], eul[1]: elr[1]], flip)
 			t_mask = np.zeros_like(t_res)
 			t_mask[ul[0] - eul[0]:lr[0] - eul[0], ul[1] - eul[1]:lr[1] - eul[1]] = 1
 			t_mask = cv2.blur(t_mask, (self.tile_overlap - 1, self.tile_overlap - 1))
 			res[eul[0] : elr[0], eul[1]: elr[1]] += t_res * t_mask
-			#mask[eul[0] : elr[0], eul[1]: elr[1]] += t_mask
+			if self.sparse:
+				mask[eul[0] : elr[0], eul[1]: elr[1]] += t_mask
 			#cv2t.imshow("tile", mask)
 			#cv2t.waitKey(0)
 
+		if self.sparse:
+			mask[mask == 0] = 100.0
+			res /= mask
 		self.moffat.apply(res)
 		return res
 		
@@ -943,6 +965,8 @@ class TilePsf:
 	def hfr(self):
 		hfrlist = []
 		for psf, ul, lr, eul, elr in self.tiles:
+			if psf is None:
+				continue
 			hfrlist.append(psf.hfr())
 		return np.median(hfrlist)
 	
@@ -1747,7 +1771,7 @@ except:
 		if args.gaussian == 0.0:
 			c_ptlist = cluster_ptlists[cluster_idx[i]]
 			c_ptlists[c] = set_psf_level(psfs, c_ptlist)
-			psf[c].extract(psfs, c_ptlists[c], args.psf_filter_sigma)
+			psf[c].extract(psfs, c_ptlists[c], args.psf_filter_sigma, mask = weights[c])
 			cv2.imwrite("testpsf%d.tif" % (c), normalize(testPsf(psfsrc[c].shape, psf[c])))
 		else:
 			psf[c].gaussian(psfs, args.gaussian)
