@@ -89,6 +89,8 @@ parser.add_argument("--lambda-eval-iter", type=int, default=1000,
 parser.add_argument("--reg-plus", type=float, default=1,
                     help="reg plus")
 
+parser.add_argument("--reg-mode", default='openclose',
+                    help="openclose open close dilate erode modian normal")
 
 
 parser.add_argument("--erode", type=float, default=0,
@@ -1201,7 +1203,7 @@ class reg_pm_2:
 
 
 class Pyramid(object):
-	def __init__(self, depth = 3, reg = None, l = None):
+	def __init__(self, depth = 3, reg = None, l = None, mode = 'normal'):
 		if reg is not None:
 			depth = len(reg)
 			self.l_mul = l
@@ -1211,13 +1213,30 @@ class Pyramid(object):
 			self.reg = [1.0] * depth
 		
 		self.depth = depth
+		self.mode = mode
 
 
-	def gaussian_pyr(self, img):
+	def gaussian_pyr(self, img, mode = 'normal'):
+		kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3,3))
 		img = np.array(img)
 		gp = [img]
 		for i in range(self.depth):
 			try:
+				if mode == 'openclose':
+					img = (cv2.morphologyEx(img, cv2.MORPH_OPEN, kernel) + cv2.morphologyEx(img, cv2.MORPH_CLOSE, kernel)) / 2.0
+				elif mode == 'open':
+					img = cv2.morphologyEx(img, cv2.MORPH_OPEN, kernel)
+				elif mode == 'close':
+					img = cv2.morphologyEx(img, cv2.MORPH_CLOSE, kernel)
+				elif mode == 'median':
+					img = cv2.medianBlur(img, 3)
+				elif mode == 'erode':
+					img = cv2.erode(img, kernel)
+				elif mode == 'dilate':
+					img = cv2.erode(img, kernel)
+				elif mode != 'normal':
+					raise Exception('bad mode', mode)
+				
 				img = cv2.pyrDown(img)
 			except:
 				pass
@@ -1225,7 +1244,7 @@ class Pyramid(object):
 		return gp
 
 	def laplacian_pyr(self, img, mask = None):
-		gp = self.gaussian_pyr(img)
+		gp = self.gaussian_pyr(img, self.mode)
 		if mask is not None:
 			mask_gp = self.gaussian_pyr(mask)
 			for i in range(self.depth + 1):
@@ -1351,7 +1370,7 @@ class reg_pyr(Pyramid):
 
 class reg_pyr_flatten(Pyramid):
 	def __init__(self, depth = 3, reg = None, l = None):
-		super(reg_pyr_flatten, self).__init__(depth, reg, l)
+		super(reg_pyr_flatten, self).__init__(depth, reg, l, mode = args.reg_mode)
 		self.m = [1] * self.depth
 	
 	def step1(self, res_a, eval_noise, weights = None):
