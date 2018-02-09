@@ -227,7 +227,7 @@ def find_ptlist(img):
 	#img[np.where(img < 0)] = 0
 
 	sigma = noise_level(img)
-	cmpmax[np.where(img <= sigma * 10)] = 0
+	cmpmax[np.where(bl <= sigma * 10)] = 0
 	
 	cv2t.imshow("cmpmax", normalize(cmpmax))
 
@@ -236,12 +236,20 @@ def find_ptlist(img):
 	return ptlist
 
 def psf_bg_w(psf):
+
 	bg = np.median(psf)
-	bg = np.median(psf[psf <= bg])
-	bg = np.median(psf[psf <= bg])
+	mask = np.zeros_like(psf, dtype=np.uint8)
+	mask[psf < bg] = 255
+
+	for i in range(10):
+		bg, stddev = cv2.meanStdDev(psf, mask = mask)
+		mask = np.zeros_like(psf, dtype=np.uint8)
+		mask[psf < bg + 2 * stddev] = 255
+
     
 	psf2  = psf - bg
-	w = np.sum(psf2[psf2 > 0.0])
+	w = np.sum(psf2)
+	
 	return bg, w
 
 
@@ -286,6 +294,7 @@ def filter_ptlist(img, i_ptlist, debug=False):
 			continue
 
 		(xc, yc) = centroid(psf)
+		#(xc, yc) = (0, 0)
 		
 		bg, w = psf_bg_w(psf)
 
@@ -296,10 +305,22 @@ def filter_ptlist(img, i_ptlist, debug=False):
 		
 		bg, w = psf_bg_w(psf2)
 		
+		if w <= 0:
+			continue
+		
 		psf2 -= bg
 		#psf2 = np.abs(psf2)
 		
-		hf = [hfr(psf2, mat) for mat in [hfr_mat, xsize_mat, ysize_mat, d1size_mat, d2size_mat]]
+		hf = []
+		skip = False
+		for mat in [hfr_mat, xsize_mat, ysize_mat, d1size_mat, d2size_mat]:
+			h = hfr(psf2, mat)
+			if h <= 0:
+				skip = True
+				break
+			hf.append(h)
+		if skip or hf[0] > args.diameter * 0.5:
+			continue
 		hf.append(xc)
 		hf.append(yc)
 		#w = max(0, maxVal - bg)
@@ -320,30 +341,29 @@ def filter_ptlist(img, i_ptlist, debug=False):
 			     & (hfrlist[:, 1] >= j * tile_w) & (hfrlist[:, 1] < (j + 1) * tile_w)] = i * args.tiles + j 
 	
 	#sigma = 10
-	keep0 = (hfrlist[:,3] > 0) & (hfrlist[:,3] < args.diameter)
 	keep_all = None
-	
+
 	for t in range(0, tiles):
 		
-		tile_mask = (tile_n == t) & keep0
+		tile_mask = (tile_n == t)
 		if not np.any(tile_mask):
 			continue
-		avg = np.mean(hfrlist[tile_mask,2] ** 2) ** 0.5
+		avg = np.median(hfrlist[tile_mask,2])
 		print("tile avg", t, np.log(avg))
 
 		keep = (hfrlist[:,2] >= avg) & tile_mask
 		if not np.any(tile_mask):
 			continue
 		
-		med = np.median(hfrlist[keep, 3])
-		sigma2 = np.median((hfrlist[keep, 3] - med)**2)
-		keep = ((hfrlist[:, 3] - med)**2 <= sigma2) & tile_mask
-		maxhfr = med + 1
 		for i in range(0, 10):
-			med = np.mean(hfrlist[keep, 3])
-			sigma2 = np.mean((hfrlist[keep, 3] - med)**2)
-			print("med, sigma", med, sigma2**0.5)
-			keep = (hfrlist[:, 3] <= min(med + sigma2**0.5 * 2, maxhfr))  & tile_mask
+			med = np.average(hfrlist[keep, 3], weights = hfrlist[keep, 2])
+			sigma2 = np.average((hfrlist[keep, 3] - med)**2, weights = hfrlist[keep, 2])
+			sigma2 = max(sigma2, 0.1)
+			print("m s", med, sigma2)
+			keep = (hfrlist[:, 3] <= med + sigma2**0.5 * 3)  & tile_mask
+		#if sigma2 > 6:
+		#	continue
+
 		if keep_all is None:
 			keep_all = keep
 		else:
@@ -353,20 +373,6 @@ def filter_ptlist(img, i_ptlist, debug=False):
 	hfrlist = hfrlist[keep_all]
 	ptlist = [ptlist[i]  for i in keep_all[0]]
 
-	print(hfrlist)
-	print(ptlist)
-
-	Y = hfrlist[:,0]
-	X = hfrlist[:,1]
-	
-	achar0 = hfrlist[:, 3 :]
-	
-	Y -= height / 2.0
-	X -= width / 2.0
-	
-	A0 = poly_array(X, Y, 3)
-	
-	W = np.array(hfrlist[:,2])
 
 	if debug:
 		print("plot")
@@ -374,7 +380,7 @@ def filter_ptlist(img, i_ptlist, debug=False):
 		
 		p = hfrlist#[hfrlist[:, 2] > 20]
 		x = p[:, 2]
-		y = p[:, 3]
+		y = p[:, 3]# / p[:, 3]
 		
 		xm = np.amax(x)
 		for i in range(100, 100):
@@ -384,6 +390,23 @@ def filter_ptlist(img, i_ptlist, debug=False):
 
 		plt.plot(np.log(x), y, 'ro')
 		plt.show()
+#	print(hfrlist)
+#	print(ptlist)
+
+	Y = hfrlist[:,0]
+	X = hfrlist[:,1]
+	
+	achar0 = np.array(hfrlist[:, 3 :])
+	
+	#achar0[:, 0 : 4] /= hfrlist[:, 3][:, np.newaxis]
+	
+	Y = (Y / height * 2.0) - 1.0
+	X = (X / width * 2.0) - 1.0
+	
+	A0 = poly_array(X, Y, 3)
+	
+	W = np.array(hfrlist[:,2])
+
 
 	W /= np.amax(W)
 	W = W * (1.0 - W)
@@ -413,9 +436,9 @@ def filter_ptlist(img, i_ptlist, debug=False):
 			char_fit = np.dot(A, char_coef[j])
 		
 			#hfr_sigma2 = np.average((ahfr - hfr_fit)**2, weights = WW)
-			char_sigma2[j] = np.average((achar[:, j] - char_fit)**2)
+			char_sigma2[j] = max(np.average((achar[:, j] - char_fit)**2), 0.1)
 			
-			kappa = 9
+			kappa = 6
 
 			char_fit0[j] = np.dot(A0, char_coef[j])
 			
@@ -447,7 +470,7 @@ def filter_ptlist(img, i_ptlist, debug=False):
 		
 		p = hfrlist[gkeep]#[hfrlist[:, 2] > 20]
 		x = p[:, 2]
-		y = p[:, 3]
+		y = p[:, 3]# / p[:, 3]
 		
 		xm = np.amax(x)
 		for i in range(100, 100):
@@ -472,12 +495,14 @@ def filter_ptlist(img, i_ptlist, debug=False):
 	return ptlist
 	
 
-def get_psf_list(img, ptlist):
+def get_psf_list(img, ptlist, over):
 	img = np.array(img, dtype=np.float32)
 	
 	psflist = []
 	for (y, x) in ptlist:
 		psf = cv2.getRectSubPix(img, (args.diameter * 2 + 1, args.diameter * 2 + 1), (x, y))
+		if np.amax(psf) > over:
+			continue
 
 		psflist.append(psf)
 	return psflist
@@ -500,12 +525,19 @@ def rrrl_simple(src, psf, it):
 	scales = np.ones((len(src),), dtype=np.float64)
 	weights = np.ones((len(src),), dtype=np.float64)
 	for i in range(len(src)):
-		bl = cv2.GaussianBlur(cv2.medianBlur(src[i], 5), (7, 7), 0)
-		minVal, maxVal, minLoc, maxLoc = cv2.minMaxLoc(bl)
+		bg, w = psf_bg_w(src[i])
+		#bl = cv2.GaussianBlur(cv2.medianBlur(src[i], 5), (7, 7), 0)
+		#minVal, maxVal, minLoc, maxLoc = cv2.minMaxLoc(bl)
 		
-		src[i] -= minVal - psf_zero
-		scales[i] = 1 / (maxVal + 0.00000000001 - minVal) 
-		weights[i] = (maxVal - minVal) #** 2
+		#src[i] -= minVal - psf_zero
+		#scales[i] = 1 / (maxVal + 0.00000000001 - minVal) 
+		#weights[i] = (maxVal - minVal) #** 2
+		
+		if w < 0:
+			w = 0
+		src[i] -= bg - psf_zero
+		scales[i] = 1 / (w + 0.00000000001)
+		weights[i] = w ** 2
 		
 		
 	src = np.atleast_3d(src)
@@ -920,6 +952,8 @@ class TilePsf:
 	def extract(self, img, ptlist, psf_filter_sigma, mask = None):
 		self.shape = img.shape
 		
+		print("max img", np.amax(img))
+		
 		if mask is not None and np.array(mask).size <= 1:
 			mask = None
 		
@@ -958,7 +992,8 @@ class TilePsf:
 						          np.count_nonzero(mask[int(py) - args.diameter: int(py) + args.diameter + 1, int(px) - args.diameter: int(px) + args.diameter + 1]) == (args.diameter * 2 + 1)**2 )):
 							t_ptlist.append((py - eul[0], px - eul[1]))
 				
-					if len(t_ptlist) > stars_tile:
+					psflist = get_psf_list(img[eul[0] : elr[0], eul[1]: elr[1]], t_ptlist, np.amax(img) * 0.95)
+					if len(psflist) > stars_tile:
 						break
 					if eul == (0,0) and elr == (h,w):
 						break
@@ -969,7 +1004,7 @@ class TilePsf:
 					self.tiles.append((psf, ul, lr, eul, elr))
 				else:
 					psf = Psf()
-					psflist = get_psf_list(img[eul[0] : elr[0], eul[1]: elr[1]], t_ptlist)
+					
 					psf.from_psflist(psflist, psf_filter_sigma)
 					self.tiles.append((psf, ul, lr, eul_mo, elr_mo))
 
@@ -1201,6 +1236,8 @@ class Pyramid(object):
 			size = (gp[i - 1].shape[1], gp[i - 1].shape[0])
 			up = cv2.pyrUp(gp[i], dstsize = size)
 			lap = cv2.subtract(gp[i-1], up)
+			if mask is not None:
+				lap[mask_gp[i-1] == 0] = 0
 			lp.append(lap)
 		return lp[::-1]
 
@@ -1851,7 +1888,6 @@ skipped = [False] * col
 res = [None] * outchannels
 var = [1.0] * outchannels
 reg_prev = [None] * outchannels
-offset = [0.0] * outchannels
 hist_weight = [None] * outchannels
 kappa = 10.0
 
@@ -1911,12 +1947,14 @@ def get_scaled_src_w(c, eval_noise = 1.0, med_bg = True):
 
 src_lp_cor = [None] * col
 
-lp_depth_min = 4
+lp_depth_min = 2
 lp_depth_max = int(np.log2(np.amin(src[0].shape)) - 1)
 print("depth max", lp_depth_max)
 pyr = Pyramid(depth = lp_depth_max - 1)
 for outc in range(0, outchannels):
 	srcpyr = [[None] * outc_num[outc] for i in range(lp_depth_min, lp_depth_max)]
+#	hp_pyr = [None] * lp_depth_min
+#	hp_pyr_stack = [[] for i in range(lp_depth_min)]
 	weightpyr = [[None] * outc_num[outc] for i in range(lp_depth_min, lp_depth_max)]
 	for ic in range(outc_num[outc]):
 		c = srcmap[outc][ic]
@@ -1941,6 +1979,16 @@ for outc in range(0, outchannels):
 			weight = cv2.erode(wgp[i], cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5,5)))
 			weight = cv2.GaussianBlur(weight, (3,3), 0)
 			weightpyr[i - lp_depth_min][ic] = weight
+		
+#		for i in range(lp_depth_min):
+#			hp_pyr_stack[i].append(slp[i])
+#			if len(hp_pyr_stack[i]) >= 5 or ic == outc_num[outc] - 1:
+#				if hp_pyr[i] is None:
+#					hp_pyr[i] = np.median(hp_pyr_stack[i], axis = 0) / ((outc_num[outc] + 4) // 5)
+#				else:
+#					hp_pyr[i] += np.median(hp_pyr_stack[i], axis = 0) / ((outc_num[outc] + 4) // 5)
+#				hp_pyr_stack[i] = []
+
 		
 	
 	res_pyr = []
@@ -1969,23 +2017,25 @@ for outc in range(0, outchannels):
 		#dif = gradient_dif_filter(dif, weight, 2 ** lp_depth_min * 16)
 		#dif = pyr.downscale(dif, lp_depth_min)
 		scaled_src = pyr.downscale(scaled_src, lp_depth_min)
+		weight = pyr.downscale(weight, lp_depth_min)
 		dif = scaled_src - mean
-		dif = cv2.medianBlur(dif, 5)
+		#dif = cv2.medianBlur(dif, 5)
 		bl = int(args.gradient_radius / 2**lp_depth_min) + 1
-		dif = cv2.blur(dif, (bl, bl))
-		dif = cv2.blur(dif, (bl, bl))
+		#dif = cv2.blur(dif, (bl, bl))
+		#dif = cv2.blur(dif, (bl, bl))
+		dif = gradient_dif_filter(dif, weight, bl)
 			
-		src_lp_cor[c] = dif
+		src_lp_cor[c] = cv2.GaussianBlur(dif, (5, 5), 0)
 		cv2.imwrite("dif%d.tif" % (c), normalize(dif))
 
 	
-	mean = pyr.upscale_to(mean, src[0].shape)
+	#hp_pyr.append(mean)
 	cv2.imwrite("pyr%d.tif" % (outc), normalize(mean**0.1))
-	
+	mean = pyr.upscale_to(mean, src[0].shape)
 	res[outc] = mean
 
 res = np.array(res)
-
+offset = np.empty_like(res)
 
 noise = noise_level(sum_src) + 0.00000001
 print("noise:", noise * 65535.0)
@@ -2192,7 +2242,7 @@ for i in range(0, it):
 
 	#reg1.step1(res, i < args.lambda_eval_iter)
 	#reg2.step1(res, i < args.lambda_eval_iter)
-	reg3.step1(res, i < args.lambda_eval_iter, weights = channel_weights)
+	reg3.step1(res + offset, i < args.lambda_eval_iter, weights = channel_weights)
 
 	for outc in range(0, outchannels):
 		var[outc] /= outc_num[outc]
@@ -2259,7 +2309,7 @@ for i in range(0, it):
 		
 		res[outc] *= cor
 		if setup:
-			res[outc] = cv2.GaussianBlur(res[outc], (3, 3), 0)
+			res[outc] = cv2.GaussianBlur(res[outc], (5, 5), 0)
 		else:
 			res[outc] += reg
 		
@@ -2296,6 +2346,7 @@ for i in range(0, it):
 		
 		res[outc] += offset[outc]
 		cv2t.imshow("res%d" % outc, normalize(np.clip(res[outc] - 1010/65535.0,10/65535.0,1)** args.show_gamma))
+		cv2t.imshow("off%d" % outc, normalize(offset[outc]))
 
 #		if args.gaussian == 0.0:
 #			curhfr = get_hfr(res[outc], ptlist)
