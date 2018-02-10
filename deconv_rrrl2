@@ -90,13 +90,11 @@ parser.add_argument("--reg-plus", type=float, default=1,
                     help="reg plus")
 
 parser.add_argument("--reg-mode", default='openclose',
-                    help="openclose open close dilate erode modian normal")
+                    help="openclose open close dilate erode median normal")
 
 
-parser.add_argument("--erode", type=float, default=0,
-                    help="erode accel")
-parser.add_argument("--erode-iter", type=int, default=0,
-                    help="stop erode at iteration i")
+parser.add_argument("--reg-morph-radius", type=int, default=1,
+                    help="morph radius")
 
 parser.add_argument("--top-thres", type=float, default=0.5,
                     help="top-thres")
@@ -1217,7 +1215,8 @@ class Pyramid(object):
 
 
 	def gaussian_pyr(self, img, mode = 'normal'):
-		kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3,3))
+		d = args.reg_morph_radius * 2 + 1
+		kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (d, d))
 		img = np.array(img)
 		gp = [img]
 		for i in range(self.depth):
@@ -1229,7 +1228,7 @@ class Pyramid(object):
 				elif mode == 'close':
 					img = cv2.morphologyEx(img, cv2.MORPH_CLOSE, kernel)
 				elif mode == 'median':
-					img = cv2.medianBlur(img, 3)
+					img = cv2.medianBlur(img, d)
 				elif mode == 'erode':
 					img = cv2.erode(img, kernel)
 				elif mode == 'dilate':
@@ -2356,11 +2355,6 @@ for i in range(0, it):
 		top[floodmask > 0] = 0
 		cv2t.imshow("top%d" % outc, normalize(top))
 		res[outc] = np.maximum(res[outc], top)
-
-		if args.erode > 0 and  i < args.erode_iter:
-			erod = up_erode(res[outc], 3)
-			res[outc] = erod * args.erode + res[outc] * (1.0 - args.erode)
-
 
 		if i < args.blur_iter:
 			res[outc] = cv2.GaussianBlur(res[outc], (17, 17), args.blur_sigma * (1.0 - i / args.blur_iter))
