@@ -1654,6 +1654,17 @@ def gradient_dif_filter2(dif, weight, r):
 
 	return res
 
+def mean_sigma_clip(a0, kappa=2, n=10):
+	a = a0
+	for i in range(0, n):
+		m = np.mean(a)
+		d2 = (a - m)**2
+		s2 = np.mean(d2)
+		d02 = (a0 - m)**2
+		a = a0[d02 <= s2 * kappa**2]
+	return m
+
+
 #########################################################################################################
 
 
@@ -1975,53 +1986,74 @@ for outc in range(0, outchannels):
 #	hp_pyr = [None] * lp_depth_min
 #	hp_pyr_stack = [[] for i in range(lp_depth_min)]
 	weightpyr = [[None] * outc_num[outc] for i in range(lp_depth_min, lp_depth_max)]
-	for ic in range(outc_num[outc]):
-		c = srcmap[outc][ic]
-		scaled_src, weight = get_scaled_src_w(c, med_bg = False)
+	for si in range([1, 3][args.update_scales]):
+		for ic in range(outc_num[outc]):
+			c = srcmap[outc][ic]
+			scaled_src, weight = get_scaled_src_w(c, med_bg = False)
+			
+			mask = np.ones_like(weight)
+			mask[weight == 0.0] = 0.0
 		
-		mask = np.ones_like(weight)
-		mask[weight == 0.0] = 0.0
+			slp = pyr.laplacian_pyr(scaled_src, mask = mask)
 		
-		slp = pyr.laplacian_pyr(scaled_src, mask = mask)
-		
-		weight *= gradient_weight[c]
-		wgp = pyr.gaussian_pyr(weight)
-		
-		for i in range(lp_depth_min, lp_depth_max):
-			if ic == 0:
-				cv2.imwrite("p%d.tif" % (i), normalize(slp[i]))
-				cv2.imwrite("w%d.tif" % (i), normalize(wgp[i]))
+			weight *= gradient_weight[c]
+			wgp = pyr.gaussian_pyr(weight)
+			
+			for i in range(lp_depth_min, lp_depth_max):
+				if ic == 0:
+					cv2.imwrite("p%d.tif" % (i), normalize(slp[i]))
+					cv2.imwrite("w%d.tif" % (i), normalize(wgp[i]))
 
 		
-			srcpyr[i - lp_depth_min][ic] = slp[i]
+				srcpyr[i - lp_depth_min][ic] = slp[i]
 			
-			weight = cv2.erode(wgp[i], cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5,5)))
-			weight = cv2.GaussianBlur(weight, (3,3), 0)
-			weightpyr[i - lp_depth_min][ic] = weight
+				weight = cv2.erode(wgp[i], cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5,5)))
+				weight = cv2.GaussianBlur(weight, (3,3), 0)
+				weightpyr[i - lp_depth_min][ic] = weight
 		
-#		for i in range(lp_depth_min):
-#			hp_pyr_stack[i].append(slp[i])
-#			if len(hp_pyr_stack[i]) >= 5 or ic == outc_num[outc] - 1:
-#				if hp_pyr[i] is None:
-#					hp_pyr[i] = np.median(hp_pyr_stack[i], axis = 0) / ((outc_num[outc] + 4) // 5)
-#				else:
-#					hp_pyr[i] += np.median(hp_pyr_stack[i], axis = 0) / ((outc_num[outc] + 4) // 5)
-#				hp_pyr_stack[i] = []
+#			for i in range(lp_depth_min):
+#				hp_pyr_stack[i].append(slp[i])
+#				if len(hp_pyr_stack[i]) >= 5 or ic == outc_num[outc] - 1:
+#					if hp_pyr[i] is None:
+#						hp_pyr[i] = np.median(hp_pyr_stack[i], axis = 0) / ((outc_num[outc] + 4) // 5)
+#					else:
+#						hp_pyr[i] += np.median(hp_pyr_stack[i], axis = 0) / ((outc_num[outc] + 4) // 5)
+#					hp_pyr_stack[i] = []
 
 		
 	
-	res_pyr = []
-	for i in range(lp_depth_max - lp_depth_min):
-		weightpyr[i] = np.array(weightpyr[i])
-		for it in range(0, 5):
-			print("clip", i, np.count_nonzero(weightpyr[i]))
-			avg = np.average(srcpyr[i], axis = 0, weights = weightpyr[i])
-			d2 = (np.array(srcpyr[i]) - avg[np.newaxis, :, :]) ** 2
-			s2 = np.average(d2, axis = 0, weights = weightpyr[i])
-			weightpyr[i][d2 > s2 * 4] = 0
+		res_pyr = []
+		for i in range(lp_depth_max - lp_depth_min):
+			weightpyr[i] = np.array(weightpyr[i])
+			for it in range(0, 5):
+				print("clip", i, np.count_nonzero(weightpyr[i]))
+				avg = np.average(srcpyr[i], axis = 0, weights = weightpyr[i])
+				d2 = (np.array(srcpyr[i]) - avg[np.newaxis, :, :]) ** 2
+				s2 = np.average(d2, axis = 0, weights = weightpyr[i])
+				weightpyr[i][d2 > s2 * 4] = 0
 			
-		res_pyr.append(avg)
-		print(res_pyr[-1].shape)
+			res_pyr.append(avg)
+			print(res_pyr[-1].shape)
+
+		up_scales = []
+		for ic in range(outc_num[outc]):
+			ratios = []
+			c = srcmap[outc][ic]
+			for i in range(lp_depth_max - lp_depth_min - 1):
+				where = (res_pyr[i] != 0) & (srcpyr[i][ic] != 0) & (res_pyr[i] * srcpyr[i][ic] > 0)
+				r = res_pyr[i][where] / srcpyr[i][ic][where]
+			
+				ratios.append(np.exp(mean_sigma_clip(np.log(r), kappa=2)))
+			r = np.median(ratios)
+			print('ratios', ratios)
+			up_scales.append(r)
+		up_scales = np.array(up_scales) / np.exp(np.mean(np.log(up_scales)))
+		if args.update_scales:
+			for ic in range(outc_num[outc]):
+				c = srcmap[outc][ic]
+				scales[c] *= up_scales[ic]
+		print("up_scales", up_scales)
+			
 	
 	del srcpyr
 	del weightpyr
@@ -2053,6 +2085,7 @@ for outc in range(0, outchannels):
 	mean = pyr.upscale_to(mean, src[0].shape)
 	res[outc] = mean
 
+print("scales",scales)
 res = np.array(res)
 offset = np.empty_like(res)
 
@@ -2188,13 +2221,6 @@ for i in range(0, it):
 		cor_psf = cor
 
 		
-		if outc_num[outc] > 1 and args.update_scales:
-			cor_mean, b = weighted_lin_fit(cv2.blur(scaled_src_orig, (10, 10)), cv2.blur(b_res + offset[outc], (10, 10)), dat * hist_weight[outc])
-			scales[c] *= cor_mean ** 0.5
-
-			with lock:
-				print("cor mean %d %d" % (c, i), cor_mean)
-
 		del b_res
 
 		if setup:
@@ -2231,21 +2257,6 @@ for i in range(0, it):
 	pfor.pfor(step2, list(range(0, col)) if i % 2 == 0 else reversed(list(range(0, col))))
 	
 
-	cur_channel_scales = [1.0] * outchannels
-	for c in range(0, len(scales)):
-		outc = outmap[c]
-		cur_channel_scales[outc] *= scales[c]
-	for outc in range(0, outchannels):
-		cur_channel_scales[outc] **= 1.0 / outc_num[outc]
-		cur_channel_scales[outc] = channel_scales[outc] / cur_channel_scales[outc]
-
-	print("cur_channel_scales", cur_channel_scales)
-	for c in range(0, len(scales)):
-		outc = outmap[c]
-		scales[c] *= cur_channel_scales[outc]
-
-	print("scales", scales)
-	
 	var = var_next
 
 	norm_w = []
