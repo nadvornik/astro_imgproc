@@ -52,6 +52,9 @@ parser.add_argument("--tiles", type=int, default=4,
 parser.add_argument('--var-psf', action='store_true',
                     help="variable psf")
 
+parser.add_argument("--lp-depth-min", type=int, default=2,
+                    help="min depth for setup")
+
 parser.add_argument('--update-scales', action='store_true',
                     help="update scales")
 
@@ -93,7 +96,7 @@ parser.add_argument("--reg-mode", default='openclose',
                     help="openclose open close dilate erode median normal")
 
 
-parser.add_argument("--reg-morph-radius", type=int, default=1,
+parser.add_argument("--reg-morph-radius", type=int, default=2,
                     help="morph radius")
 
 parser.add_argument("--top-thres", type=float, default=0.5,
@@ -136,6 +139,12 @@ parser.add_argument("--tile-overlap", type=float, default=0.25,
 
 parser.add_argument("--weight-dilate", type=int, default=2,
                     help="weight dilate")
+
+parser.add_argument("--delta-x", type=float, default=0,
+                    help="delta x")
+parser.add_argument("--delta-y", type=float, default=0,
+                    help="delta y")
+
 
 parser.add_argument("--save-psf",
                     help="save psf")
@@ -1039,6 +1048,9 @@ class TilePsf:
 				psf = Psf()
 				psf.gaussian(img[eul[0] : elr[0], eul[1]: elr[1]], sigma)
 				self.tiles.append((psf, ul, lr, eul, elr))
+
+		self.moffat_base = None
+		self.moffat = None
 		
 	def apply(self, img, flip = False):
 		if self.shape != img.shape:
@@ -1065,7 +1077,8 @@ class TilePsf:
 		if self.sparse:
 			mask[mask == 0] = 100.0
 			res /= mask
-		self.moffat.apply(res)
+		if self.moffat is not None:
+		    self.moffat.apply(res)
 		return res
 		
 	def update(self, cor_psf, dat, res):
@@ -1080,7 +1093,8 @@ class TilePsf:
 			psf.update(t_cor_psf, t_dat, t_res)
 	
 	def interpolate(self, s):
-		self.moffat = self.moffat_base.interpolate(s)
+		if self.moffat_base is not None:
+			self.moffat = self.moffat_base.interpolate(s)
 
 	def hfr(self):
 		hfrlist = []
@@ -1216,23 +1230,41 @@ class Pyramid(object):
 
 	def gaussian_pyr(self, img, mode = 'normal'):
 		d = args.reg_morph_radius * 2 + 1
-		kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (d, d))
+		#kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (d, d))
 		img = np.array(img)
 		gp = [img]
 		for i in range(self.depth):
 			try:
 				if mode == 'openclose':
-					img = (cv2.morphologyEx(img, cv2.MORPH_OPEN, kernel) + cv2.morphologyEx(img, cv2.MORPH_CLOSE, kernel)) / 2.0
+					op = up_erode(img, d)
+					op = up_dilate(op, d)
+					cl = up_dilate(img, d)
+					cl = up_erode(cl, d)
+					img = (op + cl) / 2.0
+				elif mode == 'openclose2':
+					i1 = up_erode(img, d)
+					i1 = up_dilate(i1, d)
+					i1 = up_dilate(i1, d)
+					i1 = up_erode(i1, d)
+					i2 = up_dilate(img, d)
+					i2 = up_erode(i2, d)
+					i2 = up_erode(i2, d)
+					i2 = up_dilate(i2, d)
+					img = (i1 + i2) / 2.0
 				elif mode == 'open':
 					img = cv2.morphologyEx(img, cv2.MORPH_OPEN, kernel)
+					img = up_erode(img, d)
+					img = up_dilate(img, d)
 				elif mode == 'close':
+					img = up_dilate(img, d)
+					img = up_erode(img, d)
 					img = cv2.morphologyEx(img, cv2.MORPH_CLOSE, kernel)
 				elif mode == 'median':
 					img = cv2.medianBlur(img, d)
 				elif mode == 'erode':
-					img = cv2.erode(img, kernel)
+					img = up_erode(img, d)
 				elif mode == 'dilate':
-					img = cv2.erode(img, kernel)
+					img = up_dilate(img, d)
 				elif mode != 'normal':
 					raise Exception('bad mode', mode)
 				
@@ -1653,14 +1685,19 @@ def gradient_dif_filter2(dif, weight, r):
 
 	return res
 
-def mean_sigma_clip(a0, kappa=2, n=10):
+def mean_sigma_clip(a0, kappa=2, n=10, weights = None):
+	a0 = np.array(a0)
 	a = a0
+	weights0 = weights
 	for i in range(0, n):
-		m = np.mean(a)
+		m = np.average(a, weights=weights)
 		d2 = (a - m)**2
-		s2 = np.mean(d2)
+		s2 = np.average(d2, weights=weights)
 		d02 = (a0 - m)**2
-		a = a0[d02 <= s2 * kappa**2]
+		where = d02 <= s2 * kappa**2
+		a = a0[where]
+		if weights0 is not None:
+			weights = np.array(weights0)[where]
 	return m
 
 
@@ -1696,6 +1733,7 @@ maxval = []
 
 exps = []
 gradient_weight = []
+time_mov = []
 
 outmap = []
 
@@ -1723,6 +1761,7 @@ for f in args.infile:
 	fn = f
 	exp = 1.0
 	grad_weight = 1.0
+	t_mov = 0.0
 	if not os.path.isfile(fn):
 		try:
 			outc, fn = fn.split(':')
@@ -1732,6 +1771,11 @@ for f in args.infile:
 
 	for fn in fn.split(','):
 		if not os.path.isfile(fn):
+			try:
+				fn, t_mov = fn.split('#')
+				t_mov = float(t_mov)
+			except:
+				pass
 			try:
 				fn, exp_s, grad_weight_s = fn.split('@')
 				exp = float(exp_s)
@@ -1791,6 +1835,7 @@ for f in args.infile:
 		
 			exps.append(exp)
 			gradient_weight.append(grad_weight)
+			time_mov.append(t_mov)
 		imgidx.append(cidx)
 		transp.append(transp_c)
 
@@ -1829,6 +1874,7 @@ for c in range(0, len(src)):
 	channel_weights[outc] += (src_signal_level[c] / src_sigma[c]) ** 2
 
 channel_weights = np.array(channel_weights)** 0.5
+#channel_weights = np.array([1.0, 2.0, 1.0])
 print("channel_weights", channel_weights)
 
 exp_clusters = cluster_exps(exps)
@@ -1937,7 +1983,10 @@ except:
 		psf[c] = TilePsf()
 		psfs = np.array(psfsrc[c], dtype = np.float32) / psfsrc_white[c]
 		if args.gaussian == 0.0:
-			c_ptlists[c] = cluster_ptlists[cluster_idx[i]]
+			print(args.delta_x, args.delta_y, time_mov[c])
+			deltax = args.delta_x * (time_mov[c] - 0.5)
+			deltay = args.delta_y * (time_mov[c] - 0.5)
+			c_ptlists[c] = [(y - deltay, x - deltax) for (y, x) in cluster_ptlists[cluster_idx[i]]]
 			psf[c].extract(psfs, c_ptlists[c], args.psf_filter_sigma, mask = weights[c])
 			cv2.imwrite("testpsf%d.tif" % (c), normalize(testPsf(psfsrc[c].shape, psf[c])))
 		else:
@@ -1976,8 +2025,8 @@ def get_scaled_src_w(c, eval_noise = 1.0, med_bg = True):
 
 src_lp_cor = [None] * col
 
-lp_depth_min = 2
-lp_depth_max = int(np.log2(np.amin(src[0].shape)) - 1)
+lp_depth_min = args.lp_depth_min
+lp_depth_max = int(np.log2(np.amin(src[0].shape)) - 2)
 print("depth max", lp_depth_max)
 pyr = Pyramid(depth = lp_depth_max - 1)
 for outc in range(0, outchannels):
@@ -2006,8 +2055,9 @@ for outc in range(0, outchannels):
 		
 				srcpyr[i - lp_depth_min][ic] = slp[i]
 			
-				weight = cv2.erode(wgp[i], cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5,5)))
-				weight = cv2.GaussianBlur(weight, (3,3), 0)
+				weight = cv2.erode(wgp[i], cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (11,11)))
+				weight = cv2.GaussianBlur(weight, (7,7), 0)
+				weight[weight == 0.0] = 1e-12
 				weightpyr[i - lp_depth_min][ic] = weight
 		
 #			for i in range(lp_depth_min):
@@ -2042,9 +2092,9 @@ for outc in range(0, outchannels):
 				where = (res_pyr[i] != 0) & (srcpyr[i][ic] != 0) & (res_pyr[i] * srcpyr[i][ic] > 0)
 				r = res_pyr[i][where] / srcpyr[i][ic][where]
 			
-				ratios.append(np.exp(mean_sigma_clip(np.log(r), kappa=2)))
-			r = np.median(ratios)
-			print('ratios', ratios)
+				ratios.append(np.exp(mean_sigma_clip(np.log(r), weights = np.abs(res_pyr[i][where]))))
+			r = mean_sigma_clip(ratios)
+			print('ratios', r, ratios)
 			up_scales.append(r)
 		up_scales = np.array(up_scales) / np.exp(np.mean(np.log(up_scales)))
 		if args.update_scales:
@@ -2075,7 +2125,7 @@ for outc in range(0, outchannels):
 		#dif = cv2.blur(dif, (bl, bl))
 		dif = gradient_dif_filter(dif, weight, bl)
 			
-		src_lp_cor[c] = cv2.GaussianBlur(dif, (5, 5), 0)
+		src_lp_cor[c] = dif
 		cv2.imwrite("dif%d.tif" % (c), normalize(dif))
 
 	
@@ -2206,9 +2256,9 @@ for i in range(0, it):
 		dat = dat * dat
 		with lock:
 			var_next[outc] += dat
-			cv2t.imshow("var%d" % outc, dat / (var[outc] * kappa * kappa))
-			if c == 1:
-				cv2t.imshow("scaled_src%d" % c, normalize(np.clip(scaled_src_orig - 1010/65535.0,10/65535.0,1)** args.show_gamma))
+			#cv2t.imshow("var%d" % outc, dat / (var[outc] * kappa * kappa))
+			#if c == 1:
+			#	cv2t.imshow("scaled_src%d" % c, normalize(np.clip(scaled_src_orig - 1010/65535.0,10/65535.0,1)** args.show_gamma))
 		clip = np.where(dat > var[outc] * kappa * kappa)
 		
 		dat = (dat + dat_eps) ** -0.25
@@ -2287,8 +2337,8 @@ for i in range(0, it):
 		print("check reg1", np.isnan(reg).any(), cv2.minMaxLoc(reg))
 		#print("check reg2", np.isnan(reg).any(), cv2.minMaxLoc(reg))
 
-		missing = np.where(sum_w[outc] < 1.0)
-		sum_w[outc][missing] = 1
+		missing = np.where(sum_w[outc] < 1e-6)
+		sum_w[outc][missing] = 1e-6
 
 		#reg = cv2.divide(reg, sum_w[outc])
 		#reg *= np.mean(sum_w[outc])
@@ -2378,12 +2428,16 @@ for i in range(0, it):
 			#if i < 3 and curhfr > 2:
 			#	res = cv2.erode(res, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3,3)))
 
-	if args.update_iter > 0:
+	if args.update_iter > 0 and i > args.update_iter:
 		hfr_list = []
 		for c in range(0, col):
 			hfr_list.append(psf[c].hfr())
 
 		print("res_hfr", i, hfr_list)
+
+		if i % 10 == 0:
+			for c in range(0, col):
+				cv2.imwrite("testpsf%d.tif" % (c), normalize(testPsf(psfsrc[c].shape, psf[c])))
 		
 #		if i == 150:
 #			s_hfrlist = sorted(hfr_list)
