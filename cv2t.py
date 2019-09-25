@@ -36,21 +36,27 @@ class MyGUI_CV2(threading.Thread):
 		self.queue.put((name, img))
 
 	def run(self):
+		init = True
+		key = -1
 		while not self.stop:
 #			stacktraces()
-			key = cv2.waitKey(1)
+			if not init:
+				key = cv2.waitKey(1)
 			if key != -1:
 				self.key_queue.put(key)
 
-			try:
-				(name, img) = self.queue.get(block=False)
-			except queue.Empty:
-				time.sleep(0.1)
-				continue
-			if img is None:
-				cv2.namedWindow(name, cv2.WINDOW_NORMAL)
-			else:
-				cv2.imshow(name, img)
+			while True:
+				try:
+					(name, img) = self.queue.get(block=init)
+				except queue.Empty:
+					time.sleep(0.1)
+					break
+				if img is None:
+					cv2.namedWindow(name, cv2.WINDOW_NORMAL)
+					init = False
+				else:
+					cv2.imshow(name, img)
+					init = False
 
 	def set_status(self, status):
 		self.status = status
@@ -70,3 +76,4 @@ class MyGUI_CV2(threading.Thread):
 		
 
 cv2t = MyGUI_CV2()
+cv2t.namedWindow('test')

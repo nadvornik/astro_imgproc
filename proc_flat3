@@ -44,7 +44,7 @@ if args.darkframe:
 	darkframe_avg = np.median(darkframe)
 	print("darkframe_avg: ", darkframe_avg)
 
-scale = None
+scale = 0.0
 imgs = None
 
 for i, flat in enumerate(args.flat):
@@ -59,19 +59,20 @@ for i, flat in enumerate(args.flat):
 	scale_rgb = flat_coef(img_float)
 	print("scale_rgb: ", scale_rgb)
 
-	if scale is None:
-		scale = max(*scale_rgb)
-		print("scale: ", scale)
+	scale = max(scale, *scale_rgb)
 
 	
-	img_float[0::2, 0::2] = img_float[0::2, 0::2] * scale / scale_rgb[0]
-	img_float[1::2, 0::2] = img_float[1::2, 0::2] * scale / scale_rgb[1]
-	img_float[0::2, 1::2] = img_float[0::2, 1::2] * scale / scale_rgb[1]
-	img_float[1::2, 1::2] = img_float[1::2, 1::2] * scale / scale_rgb[2]
+	img_float[0::2, 0::2] = img_float[0::2, 0::2] / scale_rgb[0]
+	img_float[1::2, 0::2] = img_float[1::2, 0::2] / scale_rgb[1]
+	img_float[0::2, 1::2] = img_float[0::2, 1::2] / scale_rgb[1]
+	img_float[1::2, 1::2] = img_float[1::2, 1::2] / scale_rgb[2]
 
 	if imgs is None:
 		imgs = np.empty((len(args.flat), img_float.shape[0], img_float.shape[1]), dtype=np.float)
 	imgs[i] = img_float
+
+print("scale: ", scale)
+imgs *= scale
 
 #avg = np.median(imgs, axis = 0, overwrite_input=True)
 #avg = np.mean(imgs, axis = 0)

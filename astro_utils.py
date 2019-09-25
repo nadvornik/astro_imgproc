@@ -11,20 +11,37 @@ import cv2
 import tifffile
 import tempfile
 import subprocess
+from astropy.io import fits
 
 def normalize(img):
         dst = np.empty_like(img)
         return cv2.normalize(img, dst, alpha = 0, beta = 255, norm_type=cv2.NORM_MINMAX, dtype=cv2.CV_8UC1)
 
 cam_params = {
-	'Canon EOS 40D' : { 'cols': slice(30, 30 + 3908), 'rows': slice(18, 18 + 2600), "masked": slice(0, 30)},
-	'Canon EOS 7D' : { 'cols': slice(158, 158 + 5202), 'rows': slice(51, 51 + 3465), "masked": slice(8, 156)}
+	'Canon EOS 40D' : { 'cols': slice(30, 30 + 3908), 'rows': slice(18, 18 + 2600), "masked": slice(0, 30), 'min': 1024, 'max': 16383},
+	'Canon EOS 7D' : { 'cols': slice(158, 158 + 5202), 'rows': slice(51, 51 + 3465), "masked": slice(8, 156), 'min': 2048, 'max': 16383}
 }
+
+def imgread(name):
+	if name.endswith('.tif') or name.endswith('.tiff'):
+		img = tifffile.TiffFile(name).asarray(memmap=True)
+		return np.atleast_3d(img), 0, 65535
+
+	if name.endswith('.fits'):
+		hdul = fits.open(name)
+		img = hdul[0].data
+		return np.atleast_3d(img), 0, 65535
+
 
 def rawread(name):
 	if name.endswith('.tif') or name.endswith('.tiff'):
-		img = tifffile.imread(name)
-		return np.atleast_3d(img)[:,:, 0]
+		img = tifffile.TiffFile(name).asarray(memmap=True)
+		return np.atleast_3d(img)[:,:, 0], 0, 65535
+
+	if name.endswith('.fits'):
+		hdul = fits.open(name)
+		img = hdul[0].data
+		return np.atleast_3d(img), 0, 65535
 
 	camera = None
 	for line in subprocess.check_output(['dcraw', '-i', '-v', name], env={'LANG':'C'}, universal_newlines=True).split('\n'):
@@ -36,6 +53,9 @@ def rawread(name):
 		subprocess.check_call(['dcraw', '-E', '-T', '-4', '-t', '0', '-c', name], stdout = f)
 		img = tifffile.imread(f.name)
 		img = np.atleast_3d(img)[:,:, 0]
+		
+		maxval = None
+		minval = None
 		
 		if camera in cam_params:
 			p = cam_params[camera]
@@ -56,7 +76,16 @@ def rawread(name):
 			img = img[p['rows'], p['cols']]
 			
 			img -= np.array(mask_m, dtype = img.dtype)[:, None]
-		return img
+		
+			maxval = p['max']
+			minval = p['min']
+		if maxval is None:
+			maxval = int(np.amax(img))
+		if minval is None:
+			minval = int(np.amin(img))
+
+		
+		return img, minval, maxval
 
 def debayer(img, filt = False):
 	return cv2.cvtColor(img, cv2.COLOR_BAYER_RG2BGR)
@@ -134,6 +163,10 @@ def hp_filt_rgb(img, size = 9):
 	
 	return res
 
+def hp_filt_mono(img, size = 21):
+	bl = cv2.GaussianBlur(img, (size, size), 0)
+	res = cv2.subtract(img, bl, dtype=cv2.CV_32FC1)
+	return res
 
 def poly_array(X, Y, order = 3):
 #	return np.polynomial.polynomial.polyvander2d(X, Y, (order-1,order-1))[:, np.where(np.flipud(np.tri(order)).ravel())[0]]
@@ -189,15 +222,27 @@ def poly_fit(img, mask = None, order = 3, scale = 1, darkframes = []):
 	ret = poly_res(img.shape, coef, order = order, scale = scale, darkframes = darkframes)
 	return ret, coef
 
-def poly_bg(img, order = 3, scale = 8, it = 4, erode = 0, kappa = 2, transpmask = None, get_mask = False, darkframes = []):
-	img = np.atleast_3d(img)
-	src_shape = img.shape
-	resize_w = int((img.shape[1] + scale - 1) / scale)
-	resize_h = int((img.shape[0] + scale - 1) / scale)
-	img = cv2.resize(img, (resize_w, resize_h), interpolation=cv2.INTER_AREA)
-	#img = cv2.medianBlur(img, 3)
-	img = np.array(img, dtype = np.float64)
-	img = cv2.GaussianBlur(img, (9, 9), 0)
+def poly_bg(img, order = 3, scale = 8, it = 4, erode = 0, kappa = 2, transpmask = None, get_mask = False, darkframes = [], save_mask = None, get_stddev = False):
+	iimg = np.atleast_3d(img)
+	move_a = False
+	if iimg.shape[0] > iimg.shape[2]:
+		iimg = np.moveaxis(iimg, -1, 0)
+		move_a = True
+	src_shape = iimg.shape[1:]
+	resize_w = int((iimg.shape[2] + scale - 1) / scale)
+	resize_h = int((iimg.shape[1] + scale - 1) / scale)
+	n_ch = iimg.shape[0]
+
+
+	print(iimg.shape)
+	img = []
+	for c in range(n_ch):
+		img1 = cv2.resize(iimg[c], (resize_w, resize_h), interpolation=cv2.INTER_AREA)
+		if erode > 0:
+			kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (erode, erode))
+			img1 = cv2.erode(img1, kernel)
+		img.append(np.array(img1, dtype = np.float64))
+	del iimg
 	
 	df_res = []
 	for src_df in darkframes:
@@ -207,58 +252,49 @@ def poly_bg(img, order = 3, scale = 8, it = 4, erode = 0, kappa = 2, transpmask 
 		df_res.append(df)
 		
 	
-	#img = cv2.blur(img, (5,5))
-	
-	if erode > 0:
-		kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (erode, erode))
-		img = cv2.erode(img, kernel)
-	#img = cv2.blur(img, (5,5))
-	#img = cv2.blur(img, (5,5))
-	#img = cv2.blur(img, (5,5))
-	#tifffile.imsave("bg.tif", img)
-
-	img = np.atleast_3d(img)
-	n_ch = img.shape[2]
-	
-	grad = np.empty_like(img, dtype = np.float64)
-	lowmask = np.ones_like(img, dtype = np.uint8)
+	lowmask = np.ones((resize_h, resize_w), dtype = np.uint8)
+	if transpmask is not None:
+		lowmask = cv2.bitwise_and(lowmask, transpmask)
 	
 	eps = np.finfo(np.float32).eps * 2
+	
+	c_stddev = [0] * n_ch
 
 	for i in range(0, it):
 		coef_l = []
+		new_lowmask = np.ones((resize_h, resize_w), dtype = np.uint8) * 255
 		for c in range(0,n_ch):
-			grad[:,:,c], coef = poly_fit(img[:,:,c], mask = lowmask[:,:,c], order = order, scale = scale, darkframes = df_res)
-			#print i, c, coef
+			grad, coef = poly_fit(img[c], mask = lowmask, order = order, scale = scale, darkframes = df_res)
+			print("g", grad.shape)
+			print("m", lowmask.shape)
 			coef_l.append(coef)
-			diff = img[:,:,c] - grad[:,:,c]
-			mean, stddev = cv2.meanStdDev(diff, mask = lowmask[:,:,c])
+			diff = img[c] - grad
+			mean, stddev = cv2.meanStdDev(diff, mask = lowmask)
+			
+			c_stddev[c] = float(stddev)
 			if stddev < eps:
 				continue
 			
-			lowmask[:,:,c] = cv2.compare(img[:,:,c], grad[:,:,c] + float(stddev) * kappa, cv2.CMP_LE)
-			#if i > 4:
-			#	highmask = cv2.compare(img[:,:,c], grad[:,:,c] - float(stddev) * 2, cv2.CMP_GE)
-			#	lowmask[:,:,c] = cv2.bitwise_and(lowmask[:,:,c], highmask)
+			new_lowmask = cv2.bitwise_and(new_lowmask, cv2.compare(img[c], grad + float(stddev) * kappa, cv2.CMP_LE))
+		if transpmask is not None:
+			new_lowmask = cv2.bitwise_and(new_lowmask, transpmask)
+		lowmask = new_lowmask
 
-		
-		if n_ch == 3:
-			if transpmask is not None:
-				lowmask[:,:,0] = cv2.bitwise_and(lowmask[:,:,0], transpmask)
-			lowmask[:,:,0] = cv2.bitwise_and(lowmask[:,:,0], cv2.bitwise_and(lowmask[:,:,1], lowmask[:,:,2]))
-			lowmask[:,:,1] = lowmask[:,:,2] = lowmask[:,:,0]
-		else:
-			if transpmask is not None:
-				lowmask = cv2.bitwise_and(lowmask, transpmask)
-
-		#tifffile.imsave("lowmask%d.tif" % i, lowmask)
+		if save_mask is not None:
+			tifffile.imsave("%s%d.tif" % (save_mask, i), lowmask)
 	
 	if get_mask == True:
 		return lowmask, stddev
 	
-	res = np.empty(src_shape, dtype = np.float64)
+	res = []
 	for c in range(0,n_ch):
-		res[:,:,c] = poly_res(src_shape[0:2], coef_l[c], order = order, scale = 1, darkframes = darkframes)
+		res.append(poly_res(src_shape, coef_l[c], order = order, scale = 1, darkframes = darkframes))
+	if move_a:
+		res = np.moveaxis(res, 0, -1)
+	res = np.array(res)
+	
+	if get_stddev:
+		return res, c_stddev
 	return res
 
 def combine_images(lst, coefs, sub = None):
@@ -272,7 +308,7 @@ def combine_images(lst, coefs, sub = None):
 		buf = cv2.scaleAdd(af, c, buf)
 	return buf
 
-def fit_images(src_list, target, it = 10, mask = None, kappa = None, kappa_plus = None):
+def fit_images(src_list, target, it = 10, mask = None, kappa = None, kappa_plus = None, init_weight = None):
 	solv_a = np.array([i.ravel() for i in src_list]).T
 	solv_b = target.ravel()
 	
@@ -281,7 +317,10 @@ def fit_images(src_list, target, it = 10, mask = None, kappa = None, kappa_plus 
 		solv_a = solv_a[keep]
 		solv_b = solv_b[keep]
 	
-	weights = np.ones_like(solv_b)
+	if init_weight is not None:
+		weights = init_weight.ravel()
+	else:
+		weights = np.ones_like(solv_b)
 	
 	for i in range(0, it):
 #		print "a", solv_a
@@ -329,7 +368,7 @@ def sigma_clip(images, zero = 0, over = 50000, scales = None, adds = None, weigh
 			for i in range(0, n):
 				weights0[i, :] = np.atleast_3d(images[i])[y, :, col] / 65535.0 + 0.0000001
 
-		print(weights)
+		#print(weights)
 		if (weights is not None):
 			for i in range(0, n):
 				weights0[i, :] *= weights[i][y, :]
@@ -370,7 +409,7 @@ def sigma_clip(images, zero = 0, over = 50000, scales = None, adds = None, weigh
 				
 				cur_weights = weights0 * clip
 			
-			print(y, c)
+			#print(y, c)
 			#print "avg", avg
 			#print "sigma", variance ** 0.5
         

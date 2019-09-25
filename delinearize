@@ -14,7 +14,7 @@ import cv2
 import tifffile
 import argparse
 import sys
-from astro_utils import normalize, noise_level
+from astro_utils import normalize, noise_level, poly_bg
 from guided_filter import *
 
 
@@ -38,7 +38,18 @@ parser.add_argument("--color",
 parser.add_argument('--zero', type=int, default = 0,
                    help='output zero level')
 
-parser.add_argument("--outgamma", type=float, default=0.0,
+parser.add_argument('--offset', type=int, default = 1,
+                   help='zero offset')
+
+parser.add_argument('--poly-bg', type=int, default = 0,
+                   help='poly_bg_order')
+parser.add_argument('--poly-bg-iter', type=int, default = 10,
+                   help='poly_bg_iter')
+parser.add_argument('--poly-bg-kappa', type=float, default = 2,
+                   help='poly_bg_kappa')
+
+
+parser.add_argument("--outgamma", type=float, default=0.45,
                     help="output file gamma")
 
 parser.add_argument("--sigmaeps", type=float, default=1.0,
@@ -70,6 +81,17 @@ parser.add_argument("--normalize", action='store_true', default=False)
 parser.add_argument("--resize", type=float, default=1.0,
                     help="resize")
 
+parser.add_argument("--slices", type=int, default=5,
+                    help="slices")
+
+parser.add_argument("--levels", type=int, default=7,
+                    help="pyr levels")
+
+parser.add_argument("--pyr-denoise", type=filt_param, default='2,0.1',
+                    help="pyr denoise param")
+parser.add_argument("--denoise-levels", type=int, default=2,
+                    help="denoise pyr levels")
+
 
 args = parser.parse_args()
 
@@ -96,16 +118,131 @@ def separate_bg(img, er = 7, dil = 3):
 	return bg, stars
 
 
+
+def gaussian_pyr(img, depth):
+	gp = [img]
+	for i in range(depth):
+		try:
+			img = cv2.pyrDown(img)
+		except:
+			pass
+		gp.append(img)
+	return gp
+
+def laplacian_pyr(img, depth, gp = None):
+	if gp is None:
+		gp = gaussian_pyr(img, depth)
+		
+	lp = [ gp[-1] ]
+	for i in range(depth,0,-1):
+		size = (gp[i - 1].shape[1], gp[i - 1].shape[0])
+		up = cv2.pyrUp(gp[i], dstsize = size)
+		lap = cv2.subtract(gp[i-1], up)
+		lp.append(lap)
+	return lp[::-1]
+
+def lp_collapse(pyr):
+	depth = len(pyr)
+	up = pyr[-1]
+	for i in range(depth - 2, -1, -1):
+		size = (pyr[i].shape[1], pyr[i].shape[0])
+		up = cv2.pyrUp(up, dstsize = size)
+		up = up + pyr[i]
+	return up
+
+def merge_weight(img, lp):
+	img = np.clip(img, 0, 1)
+	w1 = (img * (1.0 - img) * 4.0)
+	#w2 = np.abs(img - cv2.GaussianBlur(img, (11,11), 0))
+	return w1# + w2
+
+
+def pyr_merge(imgs, depth = 5):
+
+	res_pyr = None
+	weight_pyr = None
+	
+	for i, img in enumerate(imgs):
+		lp = laplacian_pyr(img, depth)
+		
+		w = merge_weight(img, lp)
+		#cv2.imshow("w%d" %i, w)
+	
+		
+		wp = gaussian_pyr(w, depth)
+	
+		lpw = []
+		for lp1, wp1 in zip(lp, wp):
+			lpw.append(lp1 * wp1)
+		
+		if res_pyr is None:
+			res_pyr = lpw
+			weight_pyr = wp
+		else:
+			for r1, w1, lpw1, wp1 in zip(res_pyr, weight_pyr, lpw, wp):
+				r1 += lpw1
+				w1 += wp1
+	for r1, w1 in zip(res_pyr, weight_pyr):
+		r1 /= w1 + 0.0000001
+	
+	
+	return lp_collapse(res_pyr)
+
+
+def mean_clip(src):
+	avg, stddev = cv2.meanStdDev(src)
+	print(avg, stddev)
+	for i in range(0, 3):
+		mask = cv2.compare(np.abs(src), stddev * 2, cv2.CMP_LE)
+		avg, stddev = cv2.meanStdDev(src, mask=mask)
+		print(avg, stddev)
+	
+	stddev = float(stddev)
+	print("mean_{}: {}".format(src.shape, stddev))
+	return stddev
+
+def pyr_denoise(img, depth = 5, kappa = 2, s = 0.5):
+	res_pyr = laplacian_pyr(img, depth)
+	for r1 in res_pyr[:-1]:
+		sigma = mean_clip(r1)
+		
+		sigma *= kappa
+		r1 *= np.clip(np.abs(r1) / sigma, 0, 1) ** s
+	return lp_collapse(res_pyr)
+
+def hist_slices(src, n):
+	res = []
+	for i in range(0, n):
+		e1 = i / (n + 2.0)
+		e2 = (i + 3.0) / (n + 2.0)
+		res.append(np.clip((src - e1)/(e2 - e1), 0, 1))
+	return res
+
+
 eps = 1.0 / 65536.0
-img16 = tifffile.imread(args.infile)
-img16 = np.atleast_3d(img16)
-h, w, channels = img16.shape
+zero = args.zero / 65535.0
+offset = args.offset / 65535.0
+img_in = tifffile.imread(args.infile)
+img_in = np.atleast_3d(img_in)
+h, w, channels = img_in.shape
 	
 col = [1,1,1,3,3][channels]
-img16 = img16[:,:, 0:col]
 
-img = np.array(img16[:,:, 0:col], np.float32)
-img /= 65535.0
+if img_in.dtype == np.uint16:
+	img = np.array(img_in[:,:, 0:col], np.float32)
+	img /= 65535.0
+else:
+	img = np.array(img_in[:,:, 0:col], np.float32)
+
+if args.poly_bg > 0:
+	bg = poly_bg(cv2.medianBlur(img, 3), order = args.poly_bg, scale = 2, erode = 1, kappa = args.poly_bg_kappa, it = args.poly_bg_iter, save_mask = "mask")
+	bg -= zero
+	img -= bg
+
+img += offset
+img[img < zero] = zero
+
+np.save("lin.npy", img)
 
 if args.resize != 1.0:
 	img = cv2.resize(img, (0, 0), fy=args.resize, fx=args.resize,  interpolation=cv2.INTER_AREA)
@@ -123,12 +260,12 @@ print(img.shape)
 
 img[np.where(img < eps)] = eps
 
-zero = args.zero / 65535.0
 
+l_channel = (img[:,:, 0] * 0.3 + img[:,:, 1] * 0.6 + img[:,:, 2] * 0.1)
 l_channel = (img[:,:, 0] + img[:,:, 1] * 2 + img[:,:, 2]) / 4.0
 
 
-l_channel_z = np.clip(l_channel - zero, 0.0, 1.0 - sigma) + sigma
+l_channel_z = np.clip(l_channel - zero - offset, 0.0, 1.0 - sigma * args.sigmaeps) + sigma * args.sigmaeps
 cr_channel = (img[:,:, 0] - l_channel) / l_channel_z
 cb_channel = (img[:,:, 2] - l_channel) / l_channel_z
 
@@ -165,8 +302,8 @@ if args.color is not None:
 
 
 
-
-
+kappa,s = args.pyr_denoise
+l_channel = pyr_denoise(l_channel, depth = args.denoise_levels, kappa = kappa, s = s)
 #weights = np.ones((h,w), dtype=np.float64)
 l_channel[np.where(l_channel < eps)] = eps
 
@@ -201,6 +338,7 @@ r,s = args.gf2
 filt2 = None
 if r > 0:
 	filt2 = GuidedFilter(l_channel, r, (sigma * s) ** 2)
+	l_channel = filt2.filter(l_channel)
 
 
 l_channel -= zero
@@ -209,34 +347,37 @@ l_channel -= zero
 l_channel[np.where(l_channel < eps)] = eps
 
 
-if args.outgamma > 0:
-	l_channel = (l_channel + sigma * args.sigmaeps) ** args.outgamma
-	minval = (sigma * args.sigmaeps) ** args.outgamma
-	maxval = 0
-else:
-	l_channel = np.log(l_channel + sigma * args.sigmaeps)
-	minval = np.log(sigma * args.sigmaeps)
-	maxval = np.log(1.0)
+l_channel1 = (l_channel + sigma * args.sigmaeps) ** args.outgamma
+minval = (sigma * args.sigmaeps) ** args.outgamma
+maxval = 1
+l_channel1 = cv2.divide((l_channel1 - minval), tuple([(maxval - minval) ] * 4), dtype=cv2.CV_32FC1)
+
+
+l_channel2 = np.log(l_channel + sigma * args.sigmaeps)
+minval = np.log(sigma * args.sigmaeps)
+maxval = np.log(1.0)
+l_channel2 = cv2.divide((l_channel2 - minval), tuple([(maxval - minval) ] * 4), dtype=cv2.CV_32FC1)
 
 
 
 if args.normalize:
-	bg = cv2.dilate(l_channel, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5,5)))
-	minbg = np.min(bg)
+	l_channel1 = cv2.normalize(l_channel1, l_channel, alpha = 0, beta = 1, norm_type=cv2.NORM_MINMAX, dtype=cv2.CV_32FC1)
+	l_channel2 = cv2.normalize(l_channel2, l_channel, alpha = 0, beta = 1, norm_type=cv2.NORM_MINMAX, dtype=cv2.CV_32FC1)
 
-	l_channel[np.where(l_channel<minbg)] = minbg
-	l_channel = cv2.normalize(l_channel, l_channel, alpha = 0, beta = 1, norm_type=cv2.NORM_MINMAX, dtype=cv2.CV_32FC1)
-else:
-	l_channel = cv2.divide((l_channel - minval), tuple([(maxval - minval) ] * 4), dtype=cv2.CV_32FC1)
-	print("minval", minval, "maxval", maxval)
+#cv2.imshow("l1", l_channel1)
+#cv2.imshow("l2", l_channel2)
 
-l_channel_er = cv2.erode(l_channel, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3,3)))
-l_channel = l_channel * (1.0 - l_channel) + l_channel_er * l_channel
+slices = hist_slices(l_channel1, args.slices)
+slices.append(l_channel2)
+#cv2.waitKey(1)
 
-if filt2 is not None:
-	l_channel = filt2.filter(l_channel)
+l_channel = pyr_merge(slices, depth = args.levels)
+#cv2.imshow("l", l_channel)
+#cv2.waitKey(0)
 
 
+#l_channel_er = cv2.erode(l_channel, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3,3)))
+#l_channel = l_channel * (1.0 - l_channel) + l_channel_er * l_channel
 
 img = cv2.merge((l_channel + cr_channel * l_channel / 2 , l_channel - (cr_channel + cb_channel) * l_channel / 2, l_channel +  cb_channel * l_channel / 2))
 

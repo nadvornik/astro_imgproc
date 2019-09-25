@@ -21,7 +21,7 @@ shift
 
 IMGS=
 for f in "$@" ; do
-    df=`select_df_ff darkframe "$DARKFRAME" "$f" 8 tif`
+    df=`select_df_ff darkframe "$DARKFRAME" "$f" 20 tif`
     darksub "$f" --outbayer "tmp_avg_$f.tiff" --dark $df
     IMGS="$IMGS tmp_avg_$f.tiff"
     DF=`echo "$df" |head -n 1`

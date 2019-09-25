@@ -1,0 +1,77 @@
+#!/usr/bin/python3
+
+# Copyright (C) 2017 Vladimir Nadvornik
+#
+# This program is free software; you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation; either version 2 of the License, or
+# (at your option) any later version.
+
+
+import numpy as np
+import cv2
+
+import tifffile
+import argparse
+import sys
+from astro_utils import normalize, noise_level, poly_bg
+
+
+parser = argparse.ArgumentParser()
+parser.add_argument("outfile",
+                    help="output tiff file")
+parser.add_argument("infile",
+                    help="input tiff file")
+
+parser.add_argument('--zero', type=int, default = 1024,
+                   help='output zero level')
+
+parser.add_argument('--offset', type=int, default = 1,
+                   help='zero offset')
+
+parser.add_argument('--poly-bg', type=int, default = 0,
+                   help='poly_bg_order')
+parser.add_argument('--poly-bg-iter', type=int, default = 10,
+                   help='poly_bg_iter')
+parser.add_argument('--poly-bg-kappa', type=float, default = 2,
+                   help='poly_bg_kappa')
+args = parser.parse_args()
+
+
+
+eps = 1.0 / 65536.0
+zero = args.zero / 65535.0
+offset = args.offset / 65535.0
+img_in = tifffile.imread(args.infile)
+img_in = np.atleast_3d(img_in)
+h, w, channels = img_in.shape
+	
+col = [1,1,1,3,3][channels]
+
+if img_in.dtype == np.uint16:
+	img = np.array(img_in[:,:, 0:col], np.float32)
+	img /= 65535.0
+else:
+	img = np.array(img_in[:,:, 0:col], np.float32)
+
+if args.poly_bg > 0:
+	bg = poly_bg(cv2.medianBlur(img, 3), order = args.poly_bg, scale = 2, erode = 1, kappa = args.poly_bg_kappa, it = args.poly_bg_iter, save_mask = "mask")
+	bg -= zero
+	img -= bg
+
+img += offset
+img[img < zero] = zero
+
+np.save("lin.npy", img)
+
+h, w, nchannels = img.shape
+
+
+
+#img = np.clip(img * 65535.0, 0, 65535.0)
+#img = np.array(img, dtype = np.uint16) 
+print("check img", cv2.minMaxLoc(img[:,:,1]))
+
+if args.outfile is not None:
+	tifffile.imsave(args.outfile, img)
+

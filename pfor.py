@@ -23,9 +23,9 @@ def execute(q, func, lock):
 			break
 		func(i, lock)
 		res = True
-	if res:
-		with lock:
-			profiler.print_stats()
+#	if res:
+#		with lock:
+#			profiler.print_stats()
 
 def pfor(func, r, threads = 8):
 	lock = threading.Lock()

@@ -13,7 +13,7 @@ import cv2
 import tifffile
 import argparse
 import sys
-from astro_utils import rawread, normalize, debayer, hp_filt_bayer, hp_filt_rgb, poly_bg, fit_images, combine_images
+from astro_utils import rawread, normalize, debayer, hp_filt_bayer, hp_filt_rgb, hp_filt_mono, poly_bg, fit_images, combine_images
 
 
 def apply_flat(img, flats, coefs, log = False):
@@ -57,6 +57,25 @@ def hotpix_find(img):
 	hotpix_cnt[np.where(np.abs(img_hp) > stddev * 10)] += 100
 	cv2.imwrite("hotpix.tif", hotpix_cnt)
 	
+def gradient_dif_filter2(dif, w, r):
+	h, w = dif.shape
+	resize_w = int((w + r - 1) / r)
+	resize_h = int((w + r - 1) / r)
+	res = np.empty((resize_h, resize_w), dtype = dif.dtype)
+	for i in range(0, resize_h):
+		y0 = np.clip(int((i - 1) * h / resize_h), 0, h - 1)
+		y1 = np.clip(int((i + 2) * h / resize_h), 0, h - 1)
+		for j in range(0, resize_w):
+			x0 = np.clip(int((j - 1) * w / resize_w), 0, w - 1)
+			x1 = np.clip(int((j + 2) * w / resize_w), 0, w - 1)
+			res[i, j] = np.median(dif[y0:y1, x0:x1])
+	res = cv2.resize(res, (w, h), interpolation=cv2.INTER_LINEAR)
+	res = cv2.blur(res, (r, r))
+	res = cv2.blur(res, (r, r))
+	res = cv2.blur(res, (r, r))
+
+
+	return res
 
 
 parser = argparse.ArgumentParser()
@@ -75,6 +94,11 @@ parser.add_argument("--dark", nargs='*',
 
 parser.add_argument('--poly-bg', type=int, default = 0,
                    help='order of background polynom')
+parser.add_argument('--poly-bg-kappa', type=float, default = 2,
+                   help='kappa of background clip')
+
+parser.add_argument('--median-bg', type=int, default = 0,
+                   help='size of median filter')
 
 parser.add_argument('--scale', type=int, default = 4,
                    help='downscale')
@@ -92,7 +116,9 @@ parser.add_argument('--zero', type=int, default = 0,
                    help='output zero level')
 
 parser.add_argument("--dark-bg", action='store_true', default=False)
+parser.add_argument("--final-dark", action='store_true', default=False)
 parser.add_argument("--flat-bg", action='store_true', default=False)
+parser.add_argument("--mono", action='store_true', default=False)
 args = parser.parse_args()
 
 if args.outrgb is None and args.outfile is None and args.outbayer is None:
@@ -104,7 +130,7 @@ maxval = args.max
 
 np.set_printoptions(edgeitems = 5)
 
-img = rawread(args.infile)
+img, minval, maxval = rawread(args.infile)
 
 if maxval is None:
 	maxval = np.amax(img)
@@ -112,7 +138,7 @@ if maxval is None:
 dark = []
 if args.dark:
 	for d in args.dark:
-		dark.append(rawread(d))
+		dark.append(rawread(d)[0])
 
 if len(dark) > 0 and minval is None:
 	minval = int(np.median(dark))
@@ -122,23 +148,35 @@ if minval is None:
 	
 print("min: %d, max:%d" % (minval, maxval))
 	
+	
+hp_filt_func = hp_filt_bayer
+if args.mono:
+	hp_filt_func = hp_filt_mono
 #print img
-img_hp = hp_filt_bayer(img)
-
-dark_hp = []
-for d in dark:
-	dark_hp.append(hp_filt_bayer(d))
 
 if len(dark) > 0:
-	coefs, n = fit_images(dark_hp, img_hp, 10)
+	if args.final_dark:
+		final_dark = dark[0]
+	else:
+		img_hp = hp_filt_func(img)
 
-	final_dark = combine_images(dark, coefs, [minval] * len(dark))
+		dark_hp = []
+		for d in dark:
+			dark_hp.append(hp_filt_func(d))
+
+		mean, stddev = cv2.meanStdDev(img_hp)
+		init_weight = 1 / (1 + (img_hp / stddev)**2)
+
+		coefs, n = fit_images(dark_hp, img_hp, 10, init_weight=init_weight)
+
+		final_dark = combine_images(dark, coefs, [minval] * len(dark))
 
 	print("dark", np.median(final_dark))
 	img = cv2.subtract(img, final_dark, dtype = cv2.CV_32FC1)
 	#hotpix_find(final_dark)
 
 if args.outbayer is not None:
+	img = np.clip(img, 0, 65535)
 	img = np.array(img, dtype=np.uint16)
 	tifffile.imsave(args.outbayer, img)
 	exit(0)
@@ -146,14 +184,20 @@ if args.outbayer is not None:
 
 img = cv2.subtract(img, minval)
 
+if args.outfile is not None and args.mono:
+	img = cv2.add(img, args.zero, dtype = cv2.CV_16UC1)
+	tifffile.imsave(args.outfile, img)
+	exit(0)
+
 flat = []
 if args.flat:
 	for d in args.flat:
-		f = rawread(d)
+		f = rawread(d)[0]
 		f = cv2.subtract(f, minval)
 		flat.append(f)
 
 if len(flat) > 0:
+	flat = flat[0:1]
 	log = False
 	if len(flat) == 1:
 		coefs = [1.0]
@@ -192,6 +236,14 @@ img = cv2.multiply(img, 65535.0 / float(maxval - minval), dtype = cv2.CV_16UC1)
 #col = cv2.cvtColor(img, cv2.COLOR_BAYER_BG2RGB)
 col = debayer(img, filt = True)
 
+if args.median_bg > 0:
+	bg = np.empty_like(col, dtype=np.float32)
+	for i in range(0, 3):
+		bg[:, :, i] = gradient_dif_filter2(np.array(col[:, :, i], dtype=np.float32), 0, args.median_bg)
+	bg -= args.zero
+	col = cv2.subtract(col, bg, dtype = cv2.CV_16UC3)
+
+
 if args.poly_bg > 0:
 	bg_img = []
 
@@ -201,15 +253,26 @@ if args.poly_bg > 0:
 	
 	if len(flat) > 0  and args.flat_bg:
 		bg_img = bg_img + flat
+		for f in flat:
+			bg_img.append(cv2.divide(1.0, f, dtype=cv2.CV_64F))
+			YX = np.indices(f.shape, dtype = np.float64) / 1000.0
+			bg_img.append(cv2.divide(YX[0], f, dtype=cv2.CV_64F))
+			bg_img.append(cv2.divide(YX[1], f, dtype=cv2.CV_64F))
+			
+			bg_img.append(cv2.multiply(YX[0], f, dtype=cv2.CV_64F))
+			bg_img.append(cv2.multiply(YX[1], f, dtype=cv2.CV_64F))
+			
+			
 		
 	for i in range(len(bg_img)):
 		df = np.array(bg_img[i], dtype=np.float32)
+		df = cv2.medianBlur(df,5)
 		df = cv2.blur(df, (50,50))
 		df = cv2.blur(df, (50,50))
 		df = cv2.blur(df, (50,50))
 		bg_img[i] = df
 	
-	bg = poly_bg(col, order = args.poly_bg, scale = args.scale, erode = args.erode, it = args.iter, darkframes = bg_img)
+	bg = poly_bg(col, order = args.poly_bg, scale = args.scale, erode = args.erode, it = args.iter, kappa = args.poly_bg_kappa, darkframes = bg_img)
 	bg -= args.zero
 	col = cv2.subtract(col, bg, dtype = cv2.CV_16UC3)
 else:

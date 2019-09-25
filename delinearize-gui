@@ -1,0 +1,1195 @@
+#!/usr/bin/env python3
+
+# Copyright (C) 2019 Vladimir Nadvornik
+#
+# This program is free software; you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation; either version 2 of the License, or
+# (at your option) any later version.
+
+import tracemalloc
+tracemalloc.start()
+
+import gc
+
+import numpy as np
+import cv2
+import time
+import tifffile
+import yaml
+import argparse
+import sys
+from guided_filter import *
+from astro_utils import noise_level
+
+def s_curve(img, center, amount):
+	return ( 1.0 / (1.0 + np.exp(amount *(center - img))) - 1.0 / (1.0 + np.exp(amount * center)) ) / ( 1.0 / (1.0 + np.exp(amount * (center - 1.0))) - 1.0 / (1.0 + np.exp(amount * center)) ) 
+
+
+def erf(x):
+	# save the sign of x
+	sign = np.sign(x)
+	x = np.abs(x)
+
+	# constants
+	a1 =  0.254829592
+	a2 = -0.284496736
+	a3 =  1.421413741
+	a4 = -1.453152027
+	a5 =  1.061405429
+	p  =  0.3275911
+
+	# A&S formula 7.1.26
+	t = 1.0/(1.0 + p*x)
+	y = 1.0 - (((((a5*t + a4)*t) + a3)*t + a2)*t + a1)*t*np.exp(-x*x)
+	return sign*y # erf(-x) = -erf(x)
+    
+def gauss_s_curve(img, center, sigma):
+	return (1 + erf((img - center) / sigma / 2**0.5)) / 2.0
+
+
+def gaussian_pyr(img, depth, w = None, lpw = 0.0, ret_wp = False):
+	gp = [img]
+	wp = None
+	if w is not None and lpw != 0.0:
+		wp = gaussian_pyr(w ** lpw, depth)
+		img = img * wp[0]
+	for i in range(depth):
+		img = cv2.pyrDown(img)
+		if w is not None and lpw != 0.0:
+			gp.append(cv2.divide(img, wp[i + 1]))
+		else:
+			gp.append(img)
+	if ret_wp:
+		return gp, wp
+	else:
+		return gp
+
+def laplacian_pyr(img, depth, gp = None, w = None, lpw = 0.0):
+	wp = None
+	if gp is None:
+		gp, wp = gaussian_pyr(img, depth, w = w, lpw = lpw, ret_wp = True)
+		
+	lp = [ gp[-1] ]
+	for i in range(depth,0,-1):
+		size = (gp[i - 1].shape[1], gp[i - 1].shape[0])
+		up = cv2.pyrUp(gp[i], dstsize = size)
+		lap = cv2.subtract(gp[i-1], up)
+		if wp is not None:
+			lap[wp[i-1] == 0.0] = 0.0
+		lp.append(lap)
+	return lp[::-1]
+
+def lp_collapse(pyr):
+	depth = len(pyr)
+	up = pyr[-1]
+	for i in range(depth - 2, -1, -1):
+		size = (pyr[i].shape[1], pyr[i].shape[0])
+		up = cv2.pyrUp(up, dstsize = size)
+		up = up + pyr[i]
+	return up
+
+def remap_f_(img, g, sigma, fact):
+	dif = img - g
+	gauss = np.exp(-dif * dif / (2 * sigma * sigma))
+	res = dif * fact * gauss
+	return res
+
+def remap_f(img, g, sigma, lin):
+	return (1.0 - lin) * gauss_s_curve(img, g, sigma) + lin * img
+
+def local_laplacian_pyr(img, depth, sigma, fact, l_min = 0, l_max = 0, w = None, lpw = 0.0):
+
+	if l_max <= l_min:
+		return laplacian_pyr(img, depth, w = w, lpw = lpw)
+
+	l_max = min(l_max, depth + 1)
+
+	gp = gaussian_pyr(img, depth, w = w, lpw = lpw)
+
+	res = laplacian_pyr(img, depth, gp = gp)
+
+	steps = min(int(2.0 / sigma ) + 1, 100)
+	
+	lp_lo = laplacian_pyr(remap_f(img, 0.0, sigma, fact), depth, w = w, lpw = lpw)
+	for j in range(steps):
+		print(j)
+		low_g = j * (1.0 / steps)
+		high_g = (j + 1) * (1.0 / steps)
+		lp_hi = laplacian_pyr(remap_f(img, high_g, sigma, fact), depth, w = w, lpw = lpw)
+
+
+		for i in range(l_min, l_max):
+			where = np.where((gp[i] >= low_g) & (gp[i] <= high_g))
+			blend = (gp[i][where] - low_g) * steps
+			res[i][where] = lp_lo[i][where] * (1.0 - blend) + lp_hi[i][where] * blend
+		
+		lp_lo = lp_hi
+	return res
+
+
+def pyr_merge(imgs, depth = 5, p = 1.0):
+
+	res_pyr = None
+	weight_pyr = None
+	
+	for i, (img, w, lpw, lap_sigma, lap_lin, lap_l_min, lap_l_max) in enumerate(imgs):
+		
+		#lp = laplacian_pyr(img, depth, wp = wp, lpw = lpw)
+		lp = local_laplacian_pyr(img, depth, lap_sigma, lap_lin, lap_l_min, lap_l_max, w = w, lpw = lpw)
+		
+		#w = merge_weight(img, lp)
+		#cv2.imshow("w%d" %i, w)
+		wp = gaussian_pyr(w, depth)
+	
+		
+		for i, wp1 in enumerate(wp):
+			if i < lap_l_min:
+				wp[i][:,:] = 0.0
+			wp[i] = wp[i] ** p
+	
+		lpw = []
+		for lp1, wp1 in zip(lp, wp):
+			lpw.append(lp1 *  wp1)
+		
+		if res_pyr is None:
+			res_pyr = lpw
+			weight_pyr = wp
+		else:
+			for r1, w1, lpw1, wp1 in zip(res_pyr, weight_pyr, lpw, wp):
+				r1 += lpw1
+				w1 += wp1
+	for i, w1 in enumerate(weight_pyr):
+		res_pyr[i] = cv2.divide(res_pyr[i], w1)
+	
+	
+	return lp_collapse(res_pyr)
+
+
+def star_erode(img, r):
+	n = r * 2
+	res_list = []
+	for i in range(0, n + 1):
+		elem0 = np.zeros((r * 2 + 1, r * 2 + 1), np.uint8)
+		cv2.line(elem0, (r,r), (int(0.5 + r + r * np.sin(0.5 * np.pi * i / n)), int(0.5 + r + r * np.cos(0.5 * np.pi * i / n))) , 1)
+		for j in range(0, 4):
+			if j == 0:
+				elem = elem0
+			elif j == 1:
+				elem = elem0[:, ::-1]
+			elif j == 2:
+				elem = elem0[::-1, :]
+			elif j == 3:
+				elem = elem0[::-1, ::-1]
+			
+			print(elem)
+			res_list.append(cv2.erode(img, elem))
+	img = np.mean(res_list, axis = 0)
+	return img
+
+def up_erode(img, r, er_shape = 0):
+	if er_shape == 0:
+		k = cv2.getStructuringElement(cv2.MORPH_RECT, (r,r))
+	elif er_shape == 1:
+		k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (r,r))
+	else:
+		k = cv2.getStructuringElement(cv2.MORPH_CROSS, (r,r))
+
+	size = (img.shape[1], img.shape[0])
+	up = cv2.pyrUp(img)
+	up = cv2.erode(up, k)
+	return cv2.pyrDown(up, dstsize = size)
+
+
+def up_dilate(img, r):
+	size = (img.shape[1], img.shape[0])
+	up = cv2.pyrUp(img)
+	up = cv2.dilate(up, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (r,r)))
+	return cv2.pyrDown(up, dstsize = size)
+
+
+class ProcBase(yaml.YAMLObject):
+	@classmethod
+	def to_yaml(cls, dumper, data):
+		out_dict = dict((k, data.__dict__[k]) for k in cls.params)
+		return dumper.represent_mapping(cls.yaml_tag, out_dict)
+
+class Layer(ProcBase):
+	yaml_tag = u'!Layer'
+	params = ['a', 'b', 'gamma', 'median', 'median_min', 'erode', 'lap_sigma', 'lap_lin', 'lap_l_min', 'lap_l_max', 'lpw', 'center', 'sigma', 'contrast']
+
+	def __init__(self, a=0.3, b=10, gamma=0.5, median=0, erode=0, median_min = 0, lap_sigma = 0.25, lap_lin = 0.0, lap_l_min=0, lap_l_max=100, lpw=0.0, center=0.5, sigma=0.2, contrast=0.0):
+		self.a = a
+		self.b = b
+		self.gamma = gamma
+		self.median = median
+		self.median_min = median_min
+		self.erode = erode
+		self.lap_sigma = lap_sigma
+		self.lap_lin = lap_lin
+		self.lap_l_min = lap_l_min
+		self.lap_l_max = lap_l_max
+		self.lpw = lpw
+		self.center = center
+		self.sigma = sigma
+		self.contrast = contrast
+
+	def __repr__(self):
+		return "%s(a=%r, b=%r, gamma=%r, median=%r, median_min=%r, erode=%r,lap_sigma=%r, lap_lin=%r, lap_l_min=%r, lap_l_max=%r, lpw=%r, center=%r, sigma=%r, contrast=%r)" % (
+			self.__class__.__name__, self.a, self.b, self.gamma, self.median, self.median_min, self.erode, self.lap_sigma, self.lap_lin, self.lap_l_min, self.lap_l_max, self.lpw, self.center, self.sigma, self.contrast)
+	
+	def process(self, img, mask):
+		if self.median > 1:
+			img = np.array(img, dtype=np.float32)
+			med = cv2.medianBlur(img, self.median)
+			if self.median_min > 0:
+				img = np.amax([img, med], axis = 0)
+			else:
+				img = med
+
+		if self.erode > 0:
+			img = up_erode(img, self.erode * 2 + 1) * mask + img * (1.0 - mask)
+
+		img = img ** self.gamma
+		print(self.a, self.b, 1.0 / (1.0 + np.exp(self.b * self.a)), 1.0 / (1.0 + np.exp(self.b * (self.a - 1.0))), 1.0 / (1.0 + np.exp(self.b * self.a)))
+		img = ( 1.0 / (1.0 + np.exp(self.b *(self.a - img))) - 1.0 / (1.0 + np.exp(self.b * self.a)) ) / ( 1.0 / (1.0 + np.exp(self.b * (self.a - 1.0))) - 1.0 / (1.0 + np.exp(self.b * self.a)) ) 
+		#img = (img - self.lo) / (self.hi - self.lo)
+		img = np.clip(img, 0.0, 1.0)
+		return img
+	
+	def process_weight(self, img, mask):
+		w = np.exp(-0.5 * ((img - self.center) / self.sigma) ** 2) #/ (self.sigma * (2 * np.pi)**0.5)
+		
+		print("weight", cv2.minMaxLoc(w))
+		
+		if self.contrast != 0:
+#			g1 = cv2.GaussianBlur(img, (9, 9), 1)
+#			g3 = cv2.GaussianBlur(img, (9, 9), 2)
+#			c = np.abs(g3 - g1)
+#			#c = cv2.GaussianBlur(c, (9, 9), 2)
+#			w += c * self.contrast
+			w += mask * self.contrast
+		w = np.clip(w, 0.0, 1.0)
+		return w
+
+
+	def res_params(self, img, mask):
+		i = self.process(img, mask)
+		w = self.process_weight(i, mask)
+		
+		return i, w, self.lpw, self.lap_sigma, self.lap_lin, self.lap_l_min, self.lap_l_max
+
+	def is_disabled(self):
+		return False
+
+
+class Color(ProcBase):
+	yaml_tag = u'!Color'
+	params = ['thr', 'offset', 'high_pass', 'hp_r1', 'hp_r2', 'gf_r', 'gf_eps', 'red', 'blue', 'saturation', 'wb_r', 'wb_b', 'r_g', 'b_g', 'scnr', 'mask_w', 'mask_sat']
+
+	def __init__(self, thr=0.0, offset=0.0, high_pass = 0.0, hp_r1 = 1, hp_r2 = 1, gf_r=0, gf_eps=0.01, red=0.3, green=0.6, blue=0.1, saturation=1.0, wb_r = 1.0, wb_b = 1.0, r_g = 0.0, b_g = 0.0, scnr=0, mask_w = 1.0, mask_sat = 1.0):
+		self.thr = thr
+		self.offset = offset
+		self.high_pass = high_pass
+		self.hp_r1 = hp_r1
+		self.hp_r2 = hp_r2
+		self.gf_r = gf_r
+		self.gf_eps = gf_eps
+		self.red = red
+		self.blue = blue
+		self.saturation = saturation
+		self.wb_b = wb_b
+		self.wb_r = wb_r
+		self.b_g = b_g
+		self.r_g = r_g
+		self.scnr = scnr
+		self.mask_w = mask_w
+		self.mask_sat = mask_sat
+		
+		
+		self.green = 1.0 - self.red - self.blue
+
+	def process(self, img, mask):
+		img = np.array(img, copy=True)
+		
+		over_thr = 0.50
+		
+		over_mask = (img[:,:, 0] > np.amax(img[:,:, 0]) * over_thr) | (img[:,:, 1] > np.amax(img[:,:, 1]) * over_thr) | (img[:,:, 2] > np.amax(img[:,:, 2]) * over_thr)
+		over_mask = np.array(np.logical_not(over_mask), dtype=np.float32)
+		
+		img += self.offset
+		
+		l_channel_o = img[:,:, 0] * self.red + img[:,:, 1] * self.green + img[:,:, 2] * self.blue
+
+
+		img[:,:, 0] = img[:,:, 0] * self.wb_r - self.offset * (self.wb_r - 1)
+		img[:,:, 2] = img[:,:, 2] * self.wb_b - self.offset * (self.wb_b - 1)
+
+		#img[:,:, 1] = np.maximum(img[:,:, 1], 0.5 * (img[:,:, 0] + img[:,:, 2]))
+		if self.scnr == 1:
+			img[:,:, 1] = np.minimum(img[:,:, 1], 0.5 * (img[:,:, 0] + img[:,:, 2]))
+		elif self.scnr == 3:
+			img[:,:, 2] = np.minimum(img[:,:, 2], 0.5 * (img[:,:, 0] + img[:,:, 1]))
+		elif self.scnr == 5:
+			img[:,:, 0] = np.minimum(img[:,:, 0], 0.5 * (img[:,:, 1] + img[:,:, 2]))
+		elif self.scnr == 2:
+			img[:,:, 0] = np.maximum(img[:,:, 0], 0.5 * (img[:,:, 1] + img[:,:, 2]))
+		if self.scnr == 4:
+			img[:,:, 1] = np.maximum(img[:,:, 1], 0.5 * (img[:,:, 0] + img[:,:, 2]))
+		elif self.scnr == 6:
+			img[:,:, 2] = np.maximum(img[:,:, 2], 0.5 * (img[:,:, 0] + img[:,:, 1]))
+
+		l_channel = img[:,:, 0] * self.red + img[:,:, 1] * self.green + img[:,:, 2] * self.blue
+		
+		cr_channel = ((img[:,:, 0] * (1.0 + self.r_g) - img[:,:, 1] * self.r_g ) - l_channel) / (1.0 - self.red)
+		cb_channel = ((img[:,:, 2] * (1.0 + self.b_g) - img[:,:, 1] * self.b_g ) - l_channel) / (1.0 - self.blue)
+		
+
+		r1 = self.hp_r1 * 2 + 1
+		r2 = self.hp_r2 * 2 + 1
+		hp = l_channel - cv2.GaussianBlur(l_channel, (r1, r1), 0)
+		hp = np.abs(hp)
+		print(r2)
+		hp = cv2.GaussianBlur(hp, (r2, r2), 0)
+		hp *= self.high_pass
+
+		l_div = l_channel + self.thr + hp
+
+		cr_channel = cv2.divide(cr_channel, l_div)
+		cb_channel = cv2.divide(cb_channel, l_div)
+		
+		#over_mask[np.abs(cr_channel) < hp] = 0
+		#over_mask[np.abs(cb_channel) < hp] = 0
+		#over_mask -= np.abs(cr_channel) + np.abs(cb_channel)
+		#over_mask = np.clip(over_mask, 0, 1)
+		
+		r_pyr = laplacian_pyr(cr_channel, 8, w = over_mask, lpw = 1.0)
+		b_pyr = laplacian_pyr(cb_channel, 8, w = over_mask, lpw = 1.0)
+		cr_channel = lp_collapse(r_pyr)
+		cb_channel = lp_collapse(b_pyr)
+
+		over_mask = np.clip(over_mask - mask * self.mask_w, 0, 1)
+
+		r_pyr = laplacian_pyr(cr_channel, 8, w = over_mask, lpw = 1.0)
+		b_pyr = laplacian_pyr(cb_channel, 8, w = over_mask, lpw = 1.0)
+		cr_channel_masked = lp_collapse(r_pyr)
+		cb_channel_masked = lp_collapse(b_pyr)
+		
+		
+		cr_channel = (cr_channel - cr_channel_masked) * self.mask_sat + cr_channel_masked
+		cb_channel = (cb_channel - cb_channel_masked) * self.mask_sat + cb_channel_masked
+
+		col = cv2.merge((l_channel + cr_channel * (1.0 - self.red) , l_channel - cr_channel * (1.0 - self.red) * self.red / self.green - cb_channel * (1.0 - self.blue) * self.blue / self.green , l_channel +  cb_channel * (1.0 - self.blue)))
+
+
+		if self.gf_r > 0:
+			#filt2 = GuidedFilter(l_channel, self.gf_r, self.gf_eps ** 2)
+			filt2 = GuidedFilter(img, self.gf_r, self.gf_eps ** 2)
+			#col = filt2.filter(col)
+
+			cr_channel = filt2.filter(cr_channel)
+			cb_channel = filt2.filter(cb_channel)
+
+		l_channel = l_channel_o
+
+
+#		l_channel2 = col[:,:, 0] * self.red + col[:,:, 1] * self.green + col[:,:, 2] * self.blue
+#		cr_channel = (col[:,:, 0] - l_channel2) / (1.0 - self.red)
+#		cb_channel = (col[:,:, 2] - l_channel2) / (1.0 - self.blue)
+
+		cr_channel *= self.saturation
+		cb_channel *= self.saturation
+		
+		cv2.imshow("r", cr_channel * 0.5 + 0.5)
+		cv2.imshow("b", cb_channel * 0.5 + 0.5)
+		cv2.imshow("m", over_mask)
+		print(over_mask)
+
+		return l_channel, cr_channel, cb_channel
+	
+	def apply_col(self, l_channel, cr_channel, cb_channel):
+		cr_channel = cr_channel * l_channel
+		cb_channel = cb_channel * l_channel
+		
+		res = cv2.merge((l_channel + cr_channel * (1.0 - self.red) , l_channel - cr_channel * (1.0 - self.red) * self.red / self.green - cb_channel * (1.0 - self.blue) * self.blue / self.green , l_channel +  cb_channel * (1.0 - self.blue)))
+		res /= np.amax(l_channel)
+		res[res < 0] = 0
+		return res
+
+class RGB(ProcBase):
+	yaml_tag = u'!RGB'
+	params = ["median", "med_hi", "med_lo", "mask_med", "m_med_hi", "m_med_lo", "erode", "er_shape"]
+
+	def __init__(self, median=0, med_hi=0, med_lo=0, mask_med=0, m_med_hi=0, m_med_lo=0, erode=0, er_shape=0):
+		for p in self.__class__.params:
+			self.__dict__[p] = vars()[p]
+	
+	def __repr__(self):
+		return self.__class__.__name__ + '(' + ', '.join([ "%s=%r" % (p, self.__dict__[p]) for p in self.__class__.params ]) + ')'
+
+	def process(self, img, mask):
+		img = np.array(img, copy=True)
+		if self.median > 0:
+			med = cv2.medianBlur(img, self.median * 2 + 1)
+			if self.med_hi > 0:
+				hi = med > img
+				img[hi] = img[hi] * (1.0 - self.med_hi) + med[hi] * self.med_hi
+			if self.med_lo > 0:
+				lo = med < img
+				img[lo] = img[lo] * (1.0 - self.med_lo) + med[lo] * self.med_lo
+
+		if self.mask_med > 0:
+			img_m = np.array(img, copy=True)
+			med = cv2.medianBlur(img_m, self.mask_med * 2 + 1)
+			if self.m_med_hi > 0:
+				hi = med > img_m
+				img_m[hi] = img_m[hi] * (1.0 - self.m_med_hi) + med[hi] * self.m_med_hi
+			if self.m_med_lo > 0:
+				lo = med < img_m
+				img_m[lo] = img_m[lo] * (1.0 - self.m_med_lo) + med[lo] * self.m_med_lo
+			for c in range(img.shape[2]):
+				img[:,:, c] = img[:,:, c] * (1.0 - mask) + img_m[:,:, c] * mask
+		
+		if self.erode > 0:
+			img_m = up_erode(img, self.erode * 2 + 1, self.er_shape)
+			for c in range(img.shape[2]):
+				img[:,:, c] = img[:,:, c] * (1.0 - mask) + img_m[:,:, c] * mask
+		return img
+
+
+class StarMask(ProcBase):
+	yaml_tag = u'!StarMask'
+	params = ['channels', 'level', 'thr', 'dilate', 'blur']
+
+	def __init__(self, channels=1, level=3, thr=4, dilate=1, blur=1):
+		print("starmask init")
+		self.channels = channels
+		self.level = level
+		self.thr = thr
+		self.dilate = dilate
+		self.blur = blur
+	
+	def __repr__(self):
+		return "%s(channels=%r, level=%r, thr=%r, dilate=%r, blur=%r)" % (
+			self.__class__.__name__, self.channels, self.level, self.thr, self.dilate, self.blur)
+
+	def process(self, img):
+		if self.channels == 4:
+			return np.zeros_like(img[:, :, 0])
+		if self.channels == 0:
+			return np.ones_like(img[:, :, 0])
+		print("starmask")
+		
+		gmp = None
+		
+		for c in range(img.shape[2]):
+			cimg = img[:, :, c]
+			
+			lp = laplacian_pyr(cimg, self.level)
+			
+			mp = []
+			
+			for lp1 in lp[0:self.level]:
+				sigma = noise_level(lp1)
+				print("sigma", sigma)
+				mask = lp1 > self.thr * sigma
+				mask = mask.astype(np.uint8)
+				print(mask)
+				mp.append(mask)
+		
+			if gmp is None:
+				gmp = mp
+			else:
+				for i, mp1 in enumerate(mp):
+					gmp[i] += mp1
+
+		for i, mp1 in enumerate(gmp):
+			mp1 = np.array(mp1 >= self.channels, dtype=np.float32)
+			mp1 = up_dilate(mp1, self.dilate * 2 + 1)
+			gmp[i] = mp1
+		
+		up = gmp[-1]
+		for i in range(self.level - 2, -1, -1):
+			size = (gmp[i].shape[1], gmp[i].shape[0])
+			print(up.shape, gmp[i].shape)
+			up = cv2.pyrUp(up, dstsize = size)
+			up += gmp[i]
+
+		if self.blur > 0:
+			up = cv2.GaussianBlur(up, (9, 9), self.blur)
+			
+		up = np.clip(up, 0, 1)
+		return up
+		
+
+class Fusion(ProcBase):
+	yaml_tag = u'!Fusion'
+	params = ['depth', 'pw']
+	
+	def __init__(self, depth=50, pw=1.0):
+		self.depth = depth
+		self.pw = pw
+	
+	def process(self, imgs):
+		lc = pyr_merge(imgs, self.depth, self.pw)
+		return lc
+
+
+	def __repr__(self):
+		return "%s(depth=%r, pw=%r)" % (
+			self.__class__.__name__, self.depth, self.pw)
+
+class GuiBase:
+	def __init__(self, name, img):
+		self.name = name
+		self.img = np.array(img, copy = True)
+		self.x = 0
+		self.y = 0
+		self.w = min(img.shape[1], 800)
+		self.h = min(img.shape[0], 600)
+		self.click_x = 0
+		self.click_y = 0
+		self.zoom = False
+		
+		cv2.namedWindow(name)
+		cv2.setMouseCallback(name, self.mouse)
+		self.draw = True
+		self.draw_time = 0
+
+	def set_img(self, img):
+		self.img = np.array(img, copy = True)
+		self.draw = True
+		self.draw_time = 0
+
+	def update(self, x):
+		self.draw = True
+		self.draw_time = time.time()
+
+	def mouse(self, event,x,y,flags,param):
+		self.active_time = time.time()
+		if event == cv2.EVENT_LBUTTONDOWN:
+			self.click_x = x
+			self.click_y = y
+		elif event == cv2.EVENT_LBUTTONUP:
+			dx = x - self.click_x
+			dy = y - self.click_y
+			
+			if not self.zoom:
+				self.zoom = True
+				self.x = np.clip(x * self.img.shape[1] // self.w - self.w // 2, 0, self.img.shape[1] - self.w)
+				self.y = np.clip(y * self.img.shape[0] // self.h - self.h // 2, 0, self.img.shape[0] - self.h)
+			elif dx == 0 and dy == 0:
+				self.zoom = False
+			else:
+				self.x = np.clip(self.x - dx, 0, self.img.shape[1] - self.w)
+				self.y = np.clip(self.y - dy, 0, self.img.shape[0] - self.h)
+			self.draw = True
+			self.draw_time = time.time()
+	
+	def redraw(self):
+		if not self.draw or time.time() - self.draw_time < 0.1:
+			return False
+		
+		self.do_redraw()
+		self.draw = False
+		return True
+	
+	def get_img(self, img = None):
+		if img is None:
+			img = self.img
+		if self.zoom:
+			return img[self.y:self.y +self.h, self.x:self.x +self.w]
+		else:
+			return cv2.resize(img, (self.w, self.h), interpolation=cv2.INTER_AREA)
+	
+	def do_redraw(self):
+		self.imshow(self.get_img())
+	
+	def imshow(self, img):
+		if len(img.shape) > 2:
+			cv2.imshow(self.name, img[:,:,::-1])
+		else:
+			cv2.imshow(self.name, img)
+
+	def close(self):
+		cv2.destroyWindow(self.name)
+
+
+class GuiLayer(GuiBase, Layer):
+	yaml_tag = u'!Layer'
+
+	def __init__(self, name, img, *args, **kwargs):
+		GuiBase.__init__(self, name, img)
+		Layer.__init__(self, *args, **kwargs)
+		self.lp_depth_max = int(np.log2(np.amin(img.shape[0:2])))
+		self.lap_l_min = min(self.lp_depth_max, self.lap_l_min)
+		self.lap_l_max = min(self.lp_depth_max, self.lap_l_max)
+
+		cv2.createTrackbar('av', name, int(self.a * 1000.0), 1000, self.update)
+		cv2.createTrackbar('bv', name, int((self.b - 0.01) * 10.0), 1000, self.update)
+		cv2.createTrackbar('gm', name, int(np.log2(self.gamma)*200.0 + 500.0), 1000, self.update)
+		cv2.createTrackbar('median', name, (self.median // 2) * 2 + self.median_min, 5, self.update)
+		cv2.createTrackbar('erode', name, self.erode, 6, self.update)
+
+		cv2.createTrackbar('lap_sigma', name, int(self.lap_sigma * 1000.0), 1000, self.update)
+		cv2.createTrackbar('lap_lin', name, int(self.lap_lin * 500.0), 1000, self.update)
+		cv2.createTrackbar('lap_l_min', name, self.lap_l_min, self.lp_depth_max, self.update)
+		cv2.createTrackbar('lap_l_max', name, self.lap_l_max, self.lp_depth_max, self.update)
+
+
+		cv2.createTrackbar('lpw', name, int(self.lpw * 500.0), 1000, self.update)
+
+		cv2.createTrackbar('center', name, int(self.center * 1000.0), 1000, self.update)
+		cv2.createTrackbar('sigma', name, int(self.sigma * 1000.0), 1000, self.update)
+		cv2.createTrackbar('contrast', name, int(self.contrast * 100.0 + 500.0), 1000, self.update)
+		cv2.createTrackbar('show_weight', name, 0, 2, self.update)
+
+	def update_params(self):
+		a = cv2.getTrackbarPos('av', self.name)
+		b = cv2.getTrackbarPos('bv', self.name)
+		gamma = cv2.getTrackbarPos('gm', self.name)
+		median = cv2.getTrackbarPos('median', self.name)
+		self.erode = cv2.getTrackbarPos('erode', self.name)
+		
+		lap_sigma = cv2.getTrackbarPos('lap_sigma', self.name)
+		lap_lin = cv2.getTrackbarPos('lap_lin', self.name)
+		self.lap_l_min = cv2.getTrackbarPos('lap_l_min', self.name)
+		self.lap_l_max = cv2.getTrackbarPos('lap_l_max', self.name)
+		
+		
+		lpw = cv2.getTrackbarPos('lpw', self.name)
+		
+		
+		center = cv2.getTrackbarPos('center', self.name)
+		sigma = cv2.getTrackbarPos('sigma', self.name)
+		contrast = cv2.getTrackbarPos('contrast', self.name)
+		self.show_weight = cv2.getTrackbarPos('show_weight', self.name)
+		
+		
+		#self.lo = (float(lo) / 1000.0) ** 3
+		#self.hi = (float(hi) / 1000.0) ** 3
+		self.a = (a / 1000.0)
+		self.b = b / 10.0 + 0.01
+		
+		self.gamma = 2.0 ** (float(gamma - 500) / 200.0)
+		
+		self.median = (median // 2) * 2 + 1
+		self.median_min = median % 2
+		
+		
+		self.lap_sigma = lap_sigma / 1000.0
+		self.lap_lin = lap_lin / 500.0
+		
+		self.lpw = lpw / 500.0 #low pass weight
+		
+		self.center = float(center) / 1000.0
+		self.sigma = float(sigma) / 1000.0
+		self.contrast = (contrast - 500.0) / 100.0
+		
+		print(a)
+		print("update", self.a, self.b, self.gamma, self.median, self.median_min, self.erode, self.center, self.sigma)
+
+
+	def do_redraw(self):
+		self.update_params()
+		
+		img = self.process(self.get_img(), self.get_img(self.mask))
+		
+		if self.show_weight > 0:
+			self.imshow(self.process_weight(img, self.get_img(self.mask)))
+		else:
+			self.imshow(img)
+
+	def is_disabled(self):
+		return self.show_weight == 2
+		
+	def res(self):
+		self.update_params()
+		return self.res_params(self.img)
+		
+
+
+class GuiColor(GuiBase, Color):
+	yaml_tag = u'!Color'
+	def __init__(self, name, img, *args, **kwargs):
+		GuiBase.__init__(self, name, img)
+		Color.__init__(self, *args, **kwargs)
+		print(self.__dict__)
+		cv2.createTrackbar('thr', name, int(self.thr**(1.0/3.0) * 1000.0), 1000, self.update)
+		cv2.createTrackbar('offset', name, int(self.offset * 10 * 65535) + 500, 1000, self.update)
+		cv2.createTrackbar('high_pass', name, int(self.high_pass * 10.0), 1000, self.update)
+		cv2.createTrackbar('hp_r1', name, self.hp_r1, 30, self.update)
+		cv2.createTrackbar('hp_r2', name, self.hp_r2, 300, self.update)
+		cv2.createTrackbar('gf_r', name, self.gf_r, 30, self.update)
+		cv2.createTrackbar('gf_eps', name, int(self.gf_eps**(1.0/3.0) * 1000.0), 1000, self.update)
+		cv2.createTrackbar('red', name, int(self.red * 1000.0), 1000, self.update)
+		cv2.createTrackbar('blue', name, int(self.blue * 1000.0), 1000, self.update)
+		cv2.createTrackbar('saturation', name, int(self.saturation * 300.0), 1000, self.update)
+		cv2.createTrackbar('wb_r', name, int(self.wb_r * 100.0), 1000, self.update)
+		cv2.createTrackbar('wb_b', name, int(self.wb_b * 100.0), 1000, self.update)
+		cv2.createTrackbar('r_g', name, int(self.r_g * 300.0) + 300, 1000, self.update)
+		cv2.createTrackbar('b_g', name, int(self.b_g * 300.0) + 300, 1000, self.update)
+		cv2.createTrackbar('scnr', name, self.scnr, 6, self.update)
+		cv2.createTrackbar('mask_w', name, int(self.mask_w * 100), 1000, self.update)
+		cv2.createTrackbar('mask_sat', name, int(self.mask_sat * 500), 1000, self.update)
+		
+		cv2.createTrackbar('show_gamma', name, 100, 1000, self.update)
+		self.img2 = None
+
+
+	def update_params(self):
+		thr = cv2.getTrackbarPos('thr', self.name)
+		offset = cv2.getTrackbarPos('offset', self.name)
+		high_pass = cv2.getTrackbarPos('high_pass', self.name)
+		hp_r1 = cv2.getTrackbarPos('hp_r1', self.name)
+		hp_r2 = cv2.getTrackbarPos('hp_r2', self.name)
+		gf_r = cv2.getTrackbarPos('gf_r', self.name)
+		gf_eps = cv2.getTrackbarPos('gf_eps', self.name)
+		red = cv2.getTrackbarPos('red', self.name)
+		blue = cv2.getTrackbarPos('blue', self.name)
+		saturation = cv2.getTrackbarPos('saturation', self.name)
+		wb_r = cv2.getTrackbarPos('wb_r', self.name)
+		wb_b = cv2.getTrackbarPos('wb_b', self.name)
+		r_g = cv2.getTrackbarPos('r_g', self.name)
+		b_g = cv2.getTrackbarPos('b_g', self.name)
+		self.scnr = cv2.getTrackbarPos('scnr', self.name)
+		
+		self.mask_w = cv2.getTrackbarPos('mask_w', self.name) / 100.0
+		self.mask_sat = cv2.getTrackbarPos('mask_sat', self.name) / 500.0
+		
+		show_gamma = cv2.getTrackbarPos('show_gamma', self.name)
+		
+		self.thr = (float(thr) / 1000.0) ** 3 + 0.000000001
+		self.offset = float(offset - 500) / 10.0 / 65535.0
+		self.high_pass = float(high_pass) / 10.0
+		self.hp_r1 = hp_r1
+		self.hp_r2 = hp_r2
+		self.gf_r = gf_r
+		self.gf_eps = (float(gf_eps) / 1000.0) ** 3
+		
+		self.red = float(red) / 1000.0
+		self.blue = float(blue) / 1000.0
+		self.green = 1.0 - self.red - self.blue
+		
+		self.saturation = saturation / 300.0
+		self.wb_r = wb_r / 100.0
+		self.wb_b = wb_b / 100.0
+
+		self.r_g = r_g / 300.0 - 1.0
+		self.b_g = b_g / 300.0 - 1.0
+		
+		self.show_gamma = float(show_gamma) / 500.0
+
+	def do_redraw(self):
+		self.update_params()
+		
+		l_channel, cr_channel, cb_channel = self.process(self.get_img(), self.get_img(self.mask))
+		if self.show_gamma > 0 or self.img2 is None:
+			l_channel **= self.show_gamma
+		else:
+			l_channel = self.get_img(self.img2)
+		
+		img = self.apply_col(l_channel, cr_channel, cb_channel)
+
+		self.imshow(img)
+
+	def res(self):
+		self.update_params()
+		return self.process(self.img, self.mask)
+
+class GuiRGB(GuiBase, RGB):
+	yaml_tag = u'!RGB'
+	def __init__(self, name, img, *args, **kwargs):
+		GuiBase.__init__(self, name, img)
+		RGB.__init__(self, *args, **kwargs)
+		cv2.createTrackbar('median', name, self.median, 2, self.update)
+		cv2.createTrackbar('med_lo', name, int(self.med_lo * 1000), 1000, self.update)
+		cv2.createTrackbar('med_hi', name, int(self.med_hi * 1000), 1000, self.update)
+		cv2.createTrackbar('mask_med', name, self.mask_med, 2, self.update)
+		cv2.createTrackbar('m_med_lo', name, int(self.m_med_lo * 1000), 1000, self.update)
+		cv2.createTrackbar('m_med_hi', name, int(self.m_med_hi * 1000), 1000, self.update)
+		cv2.createTrackbar('erode', name, self.erode, 5, self.update)
+		cv2.createTrackbar('er_shape', name, self.er_shape, 5, self.update)
+		
+	def update_params(self):
+		self.median = cv2.getTrackbarPos('median', self.name)
+		self.med_lo = cv2.getTrackbarPos('med_lo', self.name) / 1000.0
+		self.med_hi = cv2.getTrackbarPos('med_hi', self.name) / 1000.0
+		self.mask_med = cv2.getTrackbarPos('mask_med', self.name)
+		self.m_med_lo = cv2.getTrackbarPos('m_med_lo', self.name) / 1000.0
+		self.m_med_hi = cv2.getTrackbarPos('m_med_hi', self.name) / 1000.0
+		self.erode = cv2.getTrackbarPos('erode', self.name)
+		self.er_shape = cv2.getTrackbarPos('er_shape', self.name)
+	
+	def do_redraw(self):
+		self.update_params()
+		
+		img = self.process(self.get_img(), self.get_img(self.mask))
+		
+		img **= 0.3
+		self.imshow(img)
+
+	def res(self):
+		self.update_params()
+		return self.process(self.img, self.mask)
+
+
+class GuiStarMask(GuiBase, StarMask):
+	yaml_tag = u'!StarMask'
+	def __init__(self, name, img, *args, **kwargs):
+		GuiBase.__init__(self, name, img)
+		StarMask.__init__(self, *args, **kwargs)
+
+		cv2.createTrackbar('channels', name, self.channels, 4, self.update)
+		cv2.createTrackbar('level', name, self.level -  1, 5, self.update)
+		cv2.createTrackbar('thr', name, self.thr, 1000, self.update)
+		cv2.createTrackbar('dilate', name, self.dilate, 30, self.update)
+		cv2.createTrackbar('blur', name, int(self.blur * 10), 100, self.update)
+		
+	def update_params(self):
+		self.channels = cv2.getTrackbarPos('channels', self.name)
+		self.level = cv2.getTrackbarPos('level', self.name) + 1
+		self.thr = cv2.getTrackbarPos('thr', self.name)
+		self.dilate = cv2.getTrackbarPos('dilate', self.name)
+		self.blur = cv2.getTrackbarPos('blur', self.name) / 10.0
+	
+	def do_redraw(self):
+		self.update_params()
+		
+		img = self.process(self.get_img())
+		
+		self.imshow(img)
+
+	def res(self):
+		self.update_params()
+		return self.process(self.img)
+
+class GuiFusion(GuiBase, Fusion):
+	yaml_tag = u'!Fusion'
+	def __init__(self, name, img, *args, **kwargs):
+		GuiBase.__init__(self, name, img)
+		Fusion.__init__(self, *args, **kwargs)
+
+		self.lp_depth_max = int(np.log2(np.amin(img.shape[0:2])) - 1)
+
+		cv2.createTrackbar('depth', name, self.depth, self.lp_depth_max, self.update)
+		cv2.createTrackbar('pow', name, int(self.pw * 100.0 - 1.0), 1000, self.update)
+
+
+	def update_params(self):
+		depth = cv2.getTrackbarPos('depth', self.name)
+		pw = cv2.getTrackbarPos('pow', self.name)
+		
+		self.depth = depth + 1
+		self.pw = ((pw + 1.0) / 100.0)
+	
+	def process(self, imgs):
+		self.update_params()
+		print(self.depth, self.pw)
+		lc = pyr_merge(imgs, self.depth, self.pw)
+		return lc
+
+
+def load_yaml_gui(fn, im):
+	layers = []
+	col = None
+	fusion = None
+	smask = None
+	cmask = None
+	rgb = None
+	
+	def construct_layer(loader, node):
+		print("layer")
+		fields = loader.construct_mapping(node)
+		i = len(layers)
+		l = GuiLayer("l%d" % i, im, **fields)
+		layers.append(l)
+		return l
+
+	def construct_col(loader, node):
+		print("col")
+		nonlocal col
+		fields = loader.construct_mapping(node)
+		col = GuiColor("col", im, **fields)
+		return col
+
+	def construct_fusion(loader, node):
+		print("fusion")
+		nonlocal fusion
+		fields = loader.construct_mapping(node)
+		fusion = GuiFusion("out", im, **fields)
+		return fusion
+
+	def construct_starmask(loader, node):
+		print("starmask")
+		nonlocal smask, cmask
+		fields = loader.construct_mapping(node)
+		if smask is None:
+			smask = GuiStarMask("StarMask", im, **fields)
+			return smask
+		else:
+			cmask = GuiStarMask("ColorMask", im, **fields)
+			return cmask
+
+	def construct_rgb(loader, node):
+		print("rgb")
+		nonlocal rgb
+		fields = loader.construct_mapping(node)
+		fusion = GuiRGB("RGB", im, **fields)
+		return rgb
+
+
+	yaml.add_constructor('!Color', construct_col)
+	yaml.add_constructor('!Layer', construct_layer)
+	yaml.add_constructor('!Fusion', construct_fusion)
+	yaml.add_constructor('!StarMask', construct_starmask)
+	yaml.add_constructor('!RGB', construct_rgb)
+	
+	try:
+		with open(fn, 'r') as infile:
+			yaml.load(infile)
+	except:
+		print("load failed")
+	
+	if smask is None and col is not None:
+		smask = GuiStarMask("StarMask", im, channels=4)
+	if cmask is None and col is not None:
+		cmask = GuiStarMask("ColorMask", im, channels=4)
+	if rgb is None and col is not None:
+		rgb = GuiRGB("RGB", im)
+
+
+	return layers, col, fusion, smask, cmask, rgb
+	
+
+def load_yaml_cmdl(fn):
+	layers = []
+	col = None
+	fusion = None
+	smask = None
+	cmask = None
+	rgb = None
+	
+	def construct_layer(loader, node):
+		print("layer")
+		fields = loader.construct_mapping(node)
+		i = len(layers)
+		l = Layer(**fields)
+		layers.append(l)
+		return l
+
+	def construct_col(loader, node):
+		print("col")
+		nonlocal col
+		fields = loader.construct_mapping(node)
+		col = Color(**fields)
+		return col
+
+	def construct_fusion(loader, node):
+		print("fusion")
+		nonlocal fusion
+		fields = loader.construct_mapping(node)
+		fusion = Fusion(**fields)
+		return fusion
+
+	def construct_starmask(loader, node):
+		print("starmask")
+		nonlocal smask, cmask
+		fields = loader.construct_mapping(node)
+		if smask is None:
+			smask = StarMask(**fields)
+			return smask
+		else:
+			cmask = StarMask(**fields)
+			return cmask
+
+	def construct_rgb(loader, node):
+		print("rgb")
+		nonlocal rgb
+		fields = loader.construct_mapping(node)
+		rgb = RGB(**fields)
+		return rgb
+
+	yaml.add_constructor('!Color', construct_col)
+	yaml.add_constructor('!Layer', construct_layer)
+	yaml.add_constructor('!Fusion', construct_fusion)
+	yaml.add_constructor('!StarMask', construct_starmask)
+	yaml.add_constructor('!RGB', construct_rgb)
+	
+	try:
+		with open(fn, 'r') as infile:
+			yaml.load(infile)
+	except:
+		print("load failed")
+
+	if smask is None and col is not None:
+		smask = StarMask(channels=4)
+	if cmask is None and col is not None:
+		cmask = StarMask(channels=4)
+	if rgb is None and col is not None:
+		rgb = RGB()
+
+	return layers, col, fusion, smask, cmask, rgb
+	
+
+def process(img, layers, col, fusion, smask, cmask, rgb):
+	cm = cmask.process(img)
+	sm = smask.process(img)
+	print(cmask)
+	img = rgb.process(img, sm)
+	print(rgb)
+	
+	lc, cr, cb = col.process(img, cm)
+	imgs = []
+	for l in layers:
+		if not l.is_disabled() or len(imgs) == 1:
+			imgs.append(l.res_params(lc, sm))
+		
+	if len(imgs) > 0:
+		lc = fusion.process(imgs)
+			
+		col.img2 = lc
+		res = col.apply_col(lc, cr, cb)
+	return res
+
+
+parser = argparse.ArgumentParser()
+parser.add_argument("infile",
+                    help="input tiff file")
+
+parser.add_argument('--zero', type=int, default = 1024,
+                   help='output zero level')
+
+parser.add_argument('--outfile',
+                   help='output file')
+
+parser.add_argument("--resize", type=float, default=1.0,
+                    help="resize")
+
+args = parser.parse_args()
+
+im = tifffile.imread(args.infile)
+im = np.atleast_3d(im)
+im = np.clip(im, 0, 1.0)
+im -= args.zero / 65535.0
+
+#im = tifffile.imread("m78.tiff")
+#im = np.array(im, dtype=np.float32)
+#im -= np.amin(im)
+#im /= np.amax(im)
+
+conf = args.infile + ".cnf"
+
+if args.outfile is not None:
+	layers, col, fusion, smask, cmask, rgb = load_yaml_cmdl(conf)
+	res = process(im, layers, col, fusion, smask, cmask, rgb)
+	if args.resize != 1.0:
+		res = cv2.resize(res, (0, 0), fy=args.resize, fx=args.resize,  interpolation=cv2.INTER_AREA)
+
+	res = np.clip(res * 65535, 0, 65535)
+	res = np.array(res, dtype=np.uint16)
+	if res is not None:
+		tifffile.imsave(args.outfile, res)
+		sys.exit(0)
+
+
+
+#cv2.imshow("col", col)
+layers, col, fusion, smask, cmask, rgb = load_yaml_gui(conf, im)
+if col is None:
+	print("load failed")
+	
+	col = GuiColor("col", im)
+	
+	smask = GuiStarMask("StarMask", im)
+	cmask = GuiStarMask("ColorMask", im)
+	rgb = RGB("RGB", im)
+
+	layers = []
+	for i in range(1):
+		l = GuiLayer("l%d" % i, im)
+		layers.append(l)
+
+	fusion = GuiFusion("out", im)
+
+num = len(layers)
+sm = smask.res()
+cm = cmask.res()
+
+rgb.mask = sm
+im2 = rgb.res()
+
+col.set_img(im2)
+col.mask = cm
+lc, cr, cb = col.res()
+for l in layers:
+	l.set_img(lc)
+	l.mask = sm
+
+
+while(1):
+	k = cv2.waitKey(1) & 0xFF
+	if k == 27:
+		break
+
+	rgb.redraw()
+	col.redraw()
+	smask.redraw()
+	cmask.redraw()
+	
+	if k == ord('n'):
+		lc, cr, cb = col.res()
+		l = GuiLayer("l%d" % num, lc)
+		num += 1
+		layers.append(l)
+	
+	if k == ord('d'):
+		t = 0
+		ii = 0
+		for i, l in enumerate(layers):
+			if l.active_time > t:
+				t = l.active_time
+				ii = i
+		layers[ii].close()
+		del layers[ii]
+	
+	if  k == ord('c'):
+		sm = smask.res()
+		cm = cmask.res()
+		rgb.mask = sm
+		im2 = rgb.res()
+		col.set_img(im2)
+		col.mask = cm
+		lc, cr, cb = col.res()
+		for l in layers:
+			l.set_img(lc)
+			l.mask = sm
+
+	for l in layers:
+		l.redraw()
+
+	if k == ord('a'):
+		res = process(im, layers, col, fusion, smask, cmask, rgb)
+		if res is not None:
+			fusion.set_img(res)
+		
+			#res = np.clip(res[:,:,::-1] * 65535.0, 0, 65535.0)
+			#res = np.array(res, dtype = np.uint16) 
+			tifffile.imsave("out.tif", res)
+
+		gc.collect()
+		
+		snap = tracemalloc.take_snapshot()
+		top_stats = snap.statistics('lineno')
+
+		print("[ Top 10 differences ]")
+		for stat in top_stats[:10]:
+			print(stat)
+
+	if k == ord('s'):
+		with open(conf, 'w') as outfile:
+    			yaml.dump([rgb, fusion, [smask, cmask], col, layers], outfile, default_flow_style=False)
+
+	fusion.redraw()
+
+cv2.destroyAllWindows()

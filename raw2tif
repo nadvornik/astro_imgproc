@@ -22,7 +22,7 @@ parser.add_argument("infile",
                     help="input tiff file")
 args = parser.parse_args()
 
-img = rawread(args.infile)
+img = rawread(args.infile)[0]
 
 
 tifffile.imsave(args.outfile, img)
