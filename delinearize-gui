@@ -145,9 +145,9 @@ def pyr_merge(imgs, depth = 5, p = 1.0):
 		
 		for i, wp1 in enumerate(wp):
 			if i < lap_l_min:
-				wp[i][:,:] = 0.0
+				wp[i][:,:] = 0.00001
 			wp[i] = wp[i] ** p
-	
+		
 		lpw = []
 		for lp1, wp1 in zip(lp, wp):
 			lpw.append(lp1 *  wp1)
@@ -216,9 +216,9 @@ class ProcBase(yaml.YAMLObject):
 
 class Layer(ProcBase):
 	yaml_tag = u'!Layer'
-	params = ['a', 'b', 'gamma', 'median', 'median_min', 'erode', 'lap_sigma', 'lap_lin', 'lap_l_min', 'lap_l_max', 'lpw', 'center', 'sigma', 'contrast']
+	params = ['a', 'b', 'gamma', 'median', 'median_min', 'erode', 'lap_sigma', 'lap_lin', 'lap_l_min', 'lap_l_max', 'lpw', 'center', 'sigma', 'contrast', 'l0reduce', 'l1reduce']
 
-	def __init__(self, a=0.3, b=10, gamma=0.5, median=0, erode=0, median_min = 0, lap_sigma = 0.25, lap_lin = 0.0, lap_l_min=0, lap_l_max=100, lpw=0.0, center=0.5, sigma=0.2, contrast=0.0):
+	def __init__(self, a=0.3, b=10, gamma=0.5, median=0, erode=0, median_min = 0, lap_sigma = 0.25, lap_lin = 0.0, lap_l_min=0, lap_l_max=100, lpw=0.0, center=0.5, sigma=0.2, contrast=0.0, l0reduce=0, l1reduce=0):
 		self.a = a
 		self.b = b
 		self.gamma = gamma
@@ -233,6 +233,9 @@ class Layer(ProcBase):
 		self.center = center
 		self.sigma = sigma
 		self.contrast = contrast
+		self.l0reduce = l0reduce
+		self.l1reduce = l1reduce
+
 
 	def __repr__(self):
 		return "%s(a=%r, b=%r, gamma=%r, median=%r, median_min=%r, erode=%r,lap_sigma=%r, lap_lin=%r, lap_l_min=%r, lap_l_max=%r, lpw=%r, center=%r, sigma=%r, contrast=%r)" % (
@@ -246,6 +249,20 @@ class Layer(ProcBase):
 				img = np.amax([img, med], axis = 0)
 			else:
 				img = med
+
+
+		if self.l0reduce > 0 or self.l1reduce > 0:
+			img = np.array(img, dtype=np.float32)
+			lp = laplacian_pyr(img, 2)
+			for i, lr in enumerate([self.l0reduce, self.l1reduce]):
+				if lr > 0:
+					alp = np.abs(lp[i])
+					lp[i] *= 1.0 - alp / (alp + lr)
+				else:
+					lp[i][:, :] = 0
+			lp[2][:, :] = 0
+			img -= lp_collapse(lp)
+
 
 		if self.erode > 0:
 			img = up_erode(img, self.erode * 2 + 1) * mask + img * (1.0 - mask)
@@ -285,29 +302,26 @@ class Layer(ProcBase):
 
 class Color(ProcBase):
 	yaml_tag = u'!Color'
-	params = ['thr', 'offset', 'high_pass', 'hp_r1', 'hp_r2', 'gf_r', 'gf_eps', 'red', 'blue', 'saturation', 'wb_r', 'wb_b', 'r_g', 'b_g', 'scnr', 'mask_w', 'mask_sat']
+	params = ['thr', 'offset', 'offset_r', 'offset_b', 'high_pass', 'hp_r1', 'hp_r2', 'gf_r', 'gf_eps', 'red', 'blue', 'saturation', 'wb_r', 'wb_b', 'r_g', 'b_g', 'scnr', 'mask_w', 'mask_sat', 'c_red', 'c_blue', 'matrix']
 
-	def __init__(self, thr=0.0, offset=0.0, high_pass = 0.0, hp_r1 = 1, hp_r2 = 1, gf_r=0, gf_eps=0.01, red=0.3, green=0.6, blue=0.1, saturation=1.0, wb_r = 1.0, wb_b = 1.0, r_g = 0.0, b_g = 0.0, scnr=0, mask_w = 1.0, mask_sat = 1.0):
-		self.thr = thr
-		self.offset = offset
-		self.high_pass = high_pass
-		self.hp_r1 = hp_r1
-		self.hp_r2 = hp_r2
-		self.gf_r = gf_r
-		self.gf_eps = gf_eps
-		self.red = red
-		self.blue = blue
-		self.saturation = saturation
-		self.wb_b = wb_b
-		self.wb_r = wb_r
-		self.b_g = b_g
-		self.r_g = r_g
-		self.scnr = scnr
-		self.mask_w = mask_w
-		self.mask_sat = mask_sat
-		
+	def __init__(self, thr=0.0, offset=0.0, offset_r=0.0, offset_b=0.0, high_pass=0.0, hp_r1=1, hp_r2=1, gf_r=0, gf_eps=0.01, red=0.3, green=0.6, blue=0.1, saturation=1.0, wb_r=1.0, wb_b=1.0, r_g=0.0, b_g=0.0, scnr=0, mask_w=1.0, mask_sat=1.0, c_red=None, c_blue=None, matrix=None):
+		for p in self.__class__.params:
+			self.__dict__[p] = vars()[p]
+
+
+		if self.c_red is None:
+			self.c_red = self.red
+		if self.c_blue is None:
+			self.c_blue = self.blue
 		
 		self.green = 1.0 - self.red - self.blue
+		self.c_green = 1.0 - self.c_red - self.c_blue
+		
+		global args
+		
+		if args.matrix is not None:
+			self.matrix = args.matrix
+			
 
 	def process(self, img, mask):
 		img = np.array(img, copy=True)
@@ -321,6 +335,19 @@ class Color(ProcBase):
 		
 		l_channel_o = img[:,:, 0] * self.red + img[:,:, 1] * self.green + img[:,:, 2] * self.blue
 
+
+		if self.matrix is not None:
+		
+#			m = np.array([
+#			   [ 0.2, 0.8, 0  ],
+#			   [ 0  , 0.2, 0.8],
+#			   [ -1 , 0  , 2  ]]).T
+			m = np.array(self.matrix).reshape((3, 3)).T
+
+			img[:, :] = np.dot(img[:, :], m)
+
+		img[:,:, 0] += self.offset_r
+		img[:,:, 2] += self.offset_b
 
 		img[:,:, 0] = img[:,:, 0] * self.wb_r - self.offset * (self.wb_r - 1)
 		img[:,:, 2] = img[:,:, 2] * self.wb_b - self.offset * (self.wb_b - 1)
@@ -339,10 +366,12 @@ class Color(ProcBase):
 		elif self.scnr == 6:
 			img[:,:, 2] = np.maximum(img[:,:, 2], 0.5 * (img[:,:, 0] + img[:,:, 1]))
 
-		l_channel = img[:,:, 0] * self.red + img[:,:, 1] * self.green + img[:,:, 2] * self.blue
+		l_channel = img[:,:, 0] * self.c_red + img[:,:, 1] * self.c_green + img[:,:, 2] * self.c_blue
 		
-		cr_channel = ((img[:,:, 0] * (1.0 + self.r_g) - img[:,:, 1] * self.r_g ) - l_channel) / (1.0 - self.red)
-		cb_channel = ((img[:,:, 2] * (1.0 + self.b_g) - img[:,:, 1] * self.b_g ) - l_channel) / (1.0 - self.blue)
+		l_channel = np.array(l_channel, dtype=np.float32)
+		
+		cr_channel = ((img[:,:, 0] * (1.0 + self.r_g) - img[:,:, 1] * self.r_g ) - l_channel) / (1.0 - self.c_red)
+		cb_channel = ((img[:,:, 2] * (1.0 + self.b_g) - img[:,:, 1] * self.b_g ) - l_channel) / (1.0 - self.c_blue)
 		
 
 		r1 = self.hp_r1 * 2 + 1
@@ -379,7 +408,7 @@ class Color(ProcBase):
 		cr_channel = (cr_channel - cr_channel_masked) * self.mask_sat + cr_channel_masked
 		cb_channel = (cb_channel - cb_channel_masked) * self.mask_sat + cb_channel_masked
 
-		col = cv2.merge((l_channel + cr_channel * (1.0 - self.red) , l_channel - cr_channel * (1.0 - self.red) * self.red / self.green - cb_channel * (1.0 - self.blue) * self.blue / self.green , l_channel +  cb_channel * (1.0 - self.blue)))
+		col = cv2.merge((l_channel + cr_channel * (1.0 - self.c_red) , l_channel - cr_channel * (1.0 - self.c_red) * self.c_red / self.c_green - cb_channel * (1.0 - self.c_blue) * self.c_blue / self.c_green , l_channel +  cb_channel * (1.0 - self.c_blue)))
 
 
 		if self.gf_r > 0:
@@ -391,6 +420,7 @@ class Color(ProcBase):
 			cb_channel = filt2.filter(cb_channel)
 
 		l_channel = l_channel_o
+		l_channel[l_channel < 0] = 0
 
 
 #		l_channel2 = col[:,:, 0] * self.red + col[:,:, 1] * self.green + col[:,:, 2] * self.blue
@@ -411,7 +441,7 @@ class Color(ProcBase):
 		cr_channel = cr_channel * l_channel
 		cb_channel = cb_channel * l_channel
 		
-		res = cv2.merge((l_channel + cr_channel * (1.0 - self.red) , l_channel - cr_channel * (1.0 - self.red) * self.red / self.green - cb_channel * (1.0 - self.blue) * self.blue / self.green , l_channel +  cb_channel * (1.0 - self.blue)))
+		res = cv2.merge((l_channel + cr_channel * (1.0 - self.c_red) , l_channel - cr_channel * (1.0 - self.c_red) * self.c_red / self.c_green - cb_channel * (1.0 - self.c_blue) * self.c_blue / self.c_green , l_channel +  cb_channel * (1.0 - self.c_blue)))
 		res /= np.amax(l_channel)
 		res[res < 0] = 0
 		return res
@@ -585,6 +615,7 @@ class GuiBase:
 				self.y = np.clip(self.y - dy, 0, self.img.shape[0] - self.h)
 			self.draw = True
 			self.draw_time = time.time()
+		self.update_params()
 	
 	def redraw(self):
 		if not self.draw or time.time() - self.draw_time < 0.1:
@@ -629,6 +660,8 @@ class GuiLayer(GuiBase, Layer):
 		cv2.createTrackbar('bv', name, int((self.b - 0.01) * 10.0), 1000, self.update)
 		cv2.createTrackbar('gm', name, int(np.log2(self.gamma)*200.0 + 500.0), 1000, self.update)
 		cv2.createTrackbar('median', name, (self.median // 2) * 2 + self.median_min, 5, self.update)
+		cv2.createTrackbar('l0reduce', name, int(self.l0reduce **(1.0/3.0) * 1000.0), 1000, self.update)
+		cv2.createTrackbar('l1reduce', name, int(self.l1reduce **(1.0/3.0) * 1000.0), 1000, self.update)
 		cv2.createTrackbar('erode', name, self.erode, 6, self.update)
 
 		cv2.createTrackbar('lap_sigma', name, int(self.lap_sigma * 1000.0), 1000, self.update)
@@ -655,7 +688,10 @@ class GuiLayer(GuiBase, Layer):
 		lap_lin = cv2.getTrackbarPos('lap_lin', self.name)
 		self.lap_l_min = cv2.getTrackbarPos('lap_l_min', self.name)
 		self.lap_l_max = cv2.getTrackbarPos('lap_l_max', self.name)
-		
+
+		self.l0reduce = (cv2.getTrackbarPos('l0reduce', self.name) / 1000.0) ** 3
+		self.l1reduce = (cv2.getTrackbarPos('l1reduce', self.name) / 1000.0) ** 3
+
 		
 		lpw = cv2.getTrackbarPos('lpw', self.name)
 		
@@ -717,6 +753,8 @@ class GuiColor(GuiBase, Color):
 		print(self.__dict__)
 		cv2.createTrackbar('thr', name, int(self.thr**(1.0/3.0) * 1000.0), 1000, self.update)
 		cv2.createTrackbar('offset', name, int(self.offset * 10 * 65535) + 500, 1000, self.update)
+		cv2.createTrackbar('offset_r', name, int(self.offset_r * 10 * 65535) + 500, 1000, self.update)
+		cv2.createTrackbar('offset_b', name, int(self.offset_b * 10 * 65535) + 500, 1000, self.update)
 		cv2.createTrackbar('high_pass', name, int(self.high_pass * 10.0), 1000, self.update)
 		cv2.createTrackbar('hp_r1', name, self.hp_r1, 30, self.update)
 		cv2.createTrackbar('hp_r2', name, self.hp_r2, 300, self.update)
@@ -724,6 +762,8 @@ class GuiColor(GuiBase, Color):
 		cv2.createTrackbar('gf_eps', name, int(self.gf_eps**(1.0/3.0) * 1000.0), 1000, self.update)
 		cv2.createTrackbar('red', name, int(self.red * 1000.0), 1000, self.update)
 		cv2.createTrackbar('blue', name, int(self.blue * 1000.0), 1000, self.update)
+		cv2.createTrackbar('c_red', name, int(self.c_red * 1000.0), 1000, self.update)
+		cv2.createTrackbar('c_blue', name, int(self.c_blue * 1000.0), 1000, self.update)
 		cv2.createTrackbar('saturation', name, int(self.saturation * 300.0), 1000, self.update)
 		cv2.createTrackbar('wb_r', name, int(self.wb_r * 100.0), 1000, self.update)
 		cv2.createTrackbar('wb_b', name, int(self.wb_b * 100.0), 1000, self.update)
@@ -740,6 +780,8 @@ class GuiColor(GuiBase, Color):
 	def update_params(self):
 		thr = cv2.getTrackbarPos('thr', self.name)
 		offset = cv2.getTrackbarPos('offset', self.name)
+		offset_r = cv2.getTrackbarPos('offset_r', self.name)
+		offset_b = cv2.getTrackbarPos('offset_b', self.name)
 		high_pass = cv2.getTrackbarPos('high_pass', self.name)
 		hp_r1 = cv2.getTrackbarPos('hp_r1', self.name)
 		hp_r2 = cv2.getTrackbarPos('hp_r2', self.name)
@@ -761,6 +803,8 @@ class GuiColor(GuiBase, Color):
 		
 		self.thr = (float(thr) / 1000.0) ** 3 + 0.000000001
 		self.offset = float(offset - 500) / 10.0 / 65535.0
+		self.offset_r = float(offset_r - 500) / 10.0 / 65535.0
+		self.offset_b = float(offset_b - 500) / 10.0 / 65535.0
 		self.high_pass = float(high_pass) / 10.0
 		self.hp_r1 = hp_r1
 		self.hp_r2 = hp_r2
@@ -769,7 +813,11 @@ class GuiColor(GuiBase, Color):
 		
 		self.red = float(red) / 1000.0
 		self.blue = float(blue) / 1000.0
+		self.c_red = float(cv2.getTrackbarPos('c_red', self.name)) / 1000.0
+		self.c_blue = float(cv2.getTrackbarPos('c_blue', self.name)) / 1000.0
 		self.green = 1.0 - self.red - self.blue
+		self.c_green = 1.0 - self.c_red - self.c_blue
+		
 		
 		self.saturation = saturation / 300.0
 		self.wb_r = wb_r / 100.0
@@ -1066,6 +1114,10 @@ parser.add_argument('--outfile',
 parser.add_argument("--resize", type=float, default=1.0,
                     help="resize")
 
+parser.add_argument("--matrix", type=float, nargs=9,
+                    help="camera matrix")
+
+
 args = parser.parse_args()
 
 im = tifffile.imread(args.infile)
@@ -1103,7 +1155,7 @@ if col is None:
 	
 	smask = GuiStarMask("StarMask", im)
 	cmask = GuiStarMask("ColorMask", im)
-	rgb = RGB("RGB", im)
+	rgb = GuiRGB("RGB", im)
 
 	layers = []
 	for i in range(1):
