@@ -21,6 +21,7 @@ import argparse
 import sys
 from guided_filter import *
 from astro_utils import noise_level
+import logging
 
 def s_curve(img, center, amount):
 	return ( 1.0 / (1.0 + np.exp(amount *(center - img))) - 1.0 / (1.0 + np.exp(amount * center)) ) / ( 1.0 / (1.0 + np.exp(amount * (center - 1.0))) - 1.0 / (1.0 + np.exp(amount * center)) ) 
@@ -323,18 +324,29 @@ class Color(ProcBase):
 			self.matrix = args.matrix
 			
 
-	def process(self, img, mask):
+	def process(self, img, imc, mask):
 		img = np.array(img, copy=True)
+		img = np.atleast_3d(img)
 		
 		over_thr = 0.50
 		
-		over_mask = (img[:,:, 0] > np.amax(img[:,:, 0]) * over_thr) | (img[:,:, 1] > np.amax(img[:,:, 1]) * over_thr) | (img[:,:, 2] > np.amax(img[:,:, 2]) * over_thr)
+		if img.shape[2] == 1:
+			over_mask = (img[:,:, 0] > np.amax(img[:,:, 0]) * over_thr)
+		else:
+			over_mask = (img[:,:, 0] > np.amax(img[:,:, 0]) * over_thr) | (img[:,:, 1] > np.amax(img[:,:, 1]) * over_thr) | (img[:,:, 2] > np.amax(img[:,:, 2]) * over_thr)
 		over_mask = np.array(np.logical_not(over_mask), dtype=np.float32)
 		
 		img += self.offset
 		
-		l_channel_o = img[:,:, 0] * self.red + img[:,:, 1] * self.green + img[:,:, 2] * self.blue
+		if img.shape[2] == 1:
+			l_channel_o = np.array(img[:,:, 0])
+		else:
+			l_channel_o = img[:,:, 0] * self.red + img[:,:, 1] * self.green + img[:,:, 2] * self.blue
+		
 
+		if imc is not None:
+			img = np.array(imc, copy=True)
+			img = np.atleast_3d(img)
 
 		if self.matrix is not None:
 		
@@ -459,8 +471,10 @@ class RGB(ProcBase):
 
 	def process(self, img, mask):
 		img = np.array(img, copy=True)
+		img = np.atleast_3d(img)
 		if self.median > 0:
 			med = cv2.medianBlur(img, self.median * 2 + 1)
+			med = np.atleast_3d(med)
 			if self.med_hi > 0:
 				hi = med > img
 				img[hi] = img[hi] * (1.0 - self.med_hi) + med[hi] * self.med_hi
@@ -471,6 +485,7 @@ class RGB(ProcBase):
 		if self.mask_med > 0:
 			img_m = np.array(img, copy=True)
 			med = cv2.medianBlur(img_m, self.mask_med * 2 + 1)
+			med = np.atleast_3d(med)
 			if self.m_med_hi > 0:
 				hi = med > img_m
 				img_m[hi] = img_m[hi] * (1.0 - self.m_med_hi) + med[hi] * self.m_med_hi
@@ -482,6 +497,7 @@ class RGB(ProcBase):
 		
 		if self.erode > 0:
 			img_m = up_erode(img, self.erode * 2 + 1, self.er_shape)
+			img_m = np.atleast_3d(img_m)
 			for c in range(img.shape[2]):
 				img[:,:, c] = img[:,:, c] * (1.0 - mask) + img_m[:,:, c] * mask
 		return img
@@ -504,6 +520,7 @@ class StarMask(ProcBase):
 			self.__class__.__name__, self.channels, self.level, self.thr, self.dilate, self.blur)
 
 	def process(self, img):
+		img = np.atleast_3d(img)
 		if self.channels == 4:
 			return np.zeros_like(img[:, :, 0])
 		if self.channels == 0:
@@ -747,7 +764,7 @@ class GuiLayer(GuiBase, Layer):
 
 class GuiColor(GuiBase, Color):
 	yaml_tag = u'!Color'
-	def __init__(self, name, img, *args, **kwargs):
+	def __init__(self, name, img, imc, *args, **kwargs):
 		GuiBase.__init__(self, name, img)
 		Color.__init__(self, *args, **kwargs)
 		print(self.__dict__)
@@ -775,6 +792,7 @@ class GuiColor(GuiBase, Color):
 		
 		cv2.createTrackbar('show_gamma', name, 100, 1000, self.update)
 		self.img2 = None
+		self.imc = imc
 
 
 	def update_params(self):
@@ -830,8 +848,10 @@ class GuiColor(GuiBase, Color):
 
 	def do_redraw(self):
 		self.update_params()
-		
-		l_channel, cr_channel, cb_channel = self.process(self.get_img(), self.get_img(self.mask))
+		imc = None
+		if self.imc is not None:
+			imc = self.get_img(self.imc)
+		l_channel, cr_channel, cb_channel = self.process(self.get_img(), imc, self.get_img(self.mask))
 		if self.show_gamma > 0 or self.img2 is None:
 			l_channel **= self.show_gamma
 		else:
@@ -843,7 +863,7 @@ class GuiColor(GuiBase, Color):
 
 	def res(self):
 		self.update_params()
-		return self.process(self.img, self.mask)
+		return self.process(self.img, self.imc, self.mask)
 
 class GuiRGB(GuiBase, RGB):
 	yaml_tag = u'!RGB'
@@ -938,7 +958,7 @@ class GuiFusion(GuiBase, Fusion):
 		return lc
 
 
-def load_yaml_gui(fn, im):
+def load_yaml_gui(fn, im, imc):
 	layers = []
 	col = None
 	fusion = None
@@ -958,7 +978,7 @@ def load_yaml_gui(fn, im):
 		print("col")
 		nonlocal col
 		fields = loader.construct_mapping(node)
-		col = GuiColor("col", im, **fields)
+		col = GuiColor("col", im, imc, **fields)
 		return col
 
 	def construct_fusion(loader, node):
@@ -997,7 +1017,7 @@ def load_yaml_gui(fn, im):
 		with open(fn, 'r') as infile:
 			yaml.load(infile)
 	except:
-		print("load failed")
+		logging.exception("load failed: " + fn)
 	
 	if smask is None and col is not None:
 		smask = GuiStarMask("StarMask", im, channels=4)
@@ -1080,14 +1100,14 @@ def load_yaml_cmdl(fn):
 	return layers, col, fusion, smask, cmask, rgb
 	
 
-def process(img, layers, col, fusion, smask, cmask, rgb):
+def process(img, imc, layers, col, fusion, smask, cmask, rgb):
 	cm = cmask.process(img)
 	sm = smask.process(img)
 	print(cmask)
 	img = rgb.process(img, sm)
 	print(rgb)
 	
-	lc, cr, cb = col.process(img, cm)
+	lc, cr, cb = col.process(img, imc, cm)
 	imgs = []
 	for l in layers:
 		if not l.is_disabled() or len(imgs) == 1:
@@ -1108,6 +1128,10 @@ parser.add_argument("infile",
 parser.add_argument('--zero', type=int, default = 1024,
                    help='output zero level')
 
+parser.add_argument('--infile-col',
+                   help='color input file')
+
+
 parser.add_argument('--outfile',
                    help='output file')
 
@@ -1125,16 +1149,18 @@ im = np.atleast_3d(im)
 im = np.clip(im, 0, 1.0)
 im -= args.zero / 65535.0
 
-#im = tifffile.imread("m78.tiff")
-#im = np.array(im, dtype=np.float32)
-#im -= np.amin(im)
-#im /= np.amax(im)
+imc = None
+if args.infile_col is not None:
+	imc = tifffile.imread(args.infile_col)
+	imc = np.atleast_3d(imc)
+	imc = np.clip(imc, 0, 1.0)
+	imc -= args.zero / 65535.0
 
 conf = args.infile + ".cnf"
 
 if args.outfile is not None:
 	layers, col, fusion, smask, cmask, rgb = load_yaml_cmdl(conf)
-	res = process(im, layers, col, fusion, smask, cmask, rgb)
+	res = process(im, imc, layers, col, fusion, smask, cmask, rgb)
 	if args.resize != 1.0:
 		res = cv2.resize(res, (0, 0), fy=args.resize, fx=args.resize,  interpolation=cv2.INTER_AREA)
 
@@ -1147,11 +1173,11 @@ if args.outfile is not None:
 
 
 #cv2.imshow("col", col)
-layers, col, fusion, smask, cmask, rgb = load_yaml_gui(conf, im)
+layers, col, fusion, smask, cmask, rgb = load_yaml_gui(conf, im, imc)
 if col is None:
 	print("load failed")
 	
-	col = GuiColor("col", im)
+	col = GuiColor("col", im, imc)
 	
 	smask = GuiStarMask("StarMask", im)
 	cmask = GuiStarMask("ColorMask", im)
@@ -1221,7 +1247,7 @@ while(1):
 		l.redraw()
 
 	if k == ord('a'):
-		res = process(im, layers, col, fusion, smask, cmask, rgb)
+		res = process(im, imc, layers, col, fusion, smask, cmask, rgb)
 		if res is not None:
 			fusion.set_img(res)
 		
