@@ -505,16 +505,25 @@ def noise_level(src):
 	blur = cv2.GaussianBlur(src,(11, 11),0)
 
 	noise = cv2.subtract(src, blur, dtype = cv2.CV_64FC1)
-	noise2 = noise ** 2
+	noise2 = cv2.pow(noise, 2)
 
 	avg, stddev = cv2.meanStdDev(noise)
+	try:
+		stddev = stddev.get()
+	except:
+		pass
+	stddev = np.amax(stddev)
 	for i in range(0, 10):
-		mask1 = cv2.compare(noise2, stddev ** 2 * 4, cv2.CMP_LE)
-		mask2 = cv2.compare(noise2, -(stddev ** 2 * 4), cv2.CMP_GE)
-		mask = cv2.bitwise_and(mask1, mask2)
-		mask = np.amax(np.atleast_3d(mask), axis = 2)
+		print(stddev)
+		mask = cv2.inRange(noise2, -(stddev ** 2 * 4), stddev ** 2 * 4)
+		#mask = np.amax(np.atleast_3d(mask), axis = 2)
 		avg, stddev = cv2.meanStdDev(noise, mask=mask)
-		
+		try:
+			stddev = stddev.get()
+		except:
+			pass
+		stddev = np.amax(stddev)
+
 	return np.max(stddev)
 
 

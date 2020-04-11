@@ -23,14 +23,15 @@ from guided_filter import *
 from astro_utils import noise_level
 import logging
 
+cv2.setNumThreads(-1)
+
 def s_curve(img, center, amount):
 	return ( 1.0 / (1.0 + np.exp(amount *(center - img))) - 1.0 / (1.0 + np.exp(amount * center)) ) / ( 1.0 / (1.0 + np.exp(amount * (center - 1.0))) - 1.0 / (1.0 + np.exp(amount * center)) ) 
 
-
 def erf(x):
 	# save the sign of x
-	sign = np.sign(x)
-	x = np.abs(x)
+	sign = cv2.compare(x, 0, cv2.CMP_LT)
+	cv2.subtract(0, x, x, mask=sign)
 
 	# constants
 	a1 =  0.254829592
@@ -41,24 +42,75 @@ def erf(x):
 	p  =  0.3275911
 
 	# A&S formula 7.1.26
-	t = 1.0/(1.0 + p*x)
-	y = 1.0 - (((((a5*t + a4)*t) + a3)*t + a2)*t + a1)*t*np.exp(-x*x)
-	return sign*y # erf(-x) = -erf(x)
-    
-def gauss_s_curve(img, center, sigma):
-	return (1 + erf((img - center) / sigma / 2**0.5)) / 2.0
+	t = cv2.divide(1.0, (cv2.add(cv2.multiply(x, p), 1.0)))
+	y = cv2.multiply(t, a5)
+	cv2.add(y, a4, y)
+	cv2.multiply(y, t, y)
+	cv2.add(y, a3, y)
+	cv2.multiply(y, t, y)
+	cv2.add(y, a2, y)
+	cv2.multiply(y, t, y)
+	cv2.add(y, a1, y)
+	cv2.multiply(y, t, y)
 
+	cv2.multiply(y, cv2.exp(cv2.multiply(x, x, scale=-1)), y)
+	#y = 1.0 - (((((a5*t + a4)*t) + a3)*t + a2)*t + a1)*t*np.exp(-x*x)
+	
+	cv2.subtract(1, y, y)
+	
+	cv2.subtract(0, y, y, mask=sign)
+	#return sign*y # erf(-x) = -erf(x)
+	return y
+
+
+def erf2(x):
+        # save the sign of x
+	sign = np.sign(x)
+	x = np.abs(x)
+	# constants
+	a1 =  0.254829592
+	a2 = -0.284496736
+	a3 =  1.421413741
+	a4 = -1.453152027
+	a5 =  1.061405429
+	p  =  0.3275911
+
+	t = 1.0/(1.0 + p*x)
+
+	y = (((((a5*t + a4)*t) + a3)*t + a2)*t + a1)*t
+	
+	y = 1.0 - y * np.exp(-x*x)
+	return sign*y # erf(-x) = -erf(x)
+
+
+def gauss_s_curve(img, center, sigma):
+	ret = erf(cv2.divide(cv2.subtract(img, center),  sigma * 2**0.5))
+	cv2.add(ret, 1.0, ret)
+	cv2.divide(ret, 2.0, ret)
+	return ret
+
+	#return (1 + erf((img - center) / sigma / 2**0.5)) / 2.0
+
+def pyr_size(shape, l):
+	size = (shape[1], shape[0])
+	for i in range(l):
+		size = ( (size[0] + 1) // 2, (size[1] + 1) // 2 )
+	return size
 
 def gaussian_pyr(img, depth, w = None, lpw = 0.0, ret_wp = False):
+	img = cv2.UMat(img)
+		
 	gp = [img]
 	wp = None
 	if w is not None and lpw != 0.0:
 		wp = gaussian_pyr(w ** lpw, depth)
-		img = img * wp[0]
+		img = cv2.multiply(img, wp[0])
 	for i in range(depth):
 		img = cv2.pyrDown(img)
 		if w is not None and lpw != 0.0:
-			gp.append(cv2.divide(img, wp[i + 1]))
+			img1 = cv2.divide(img, wp[i + 1])
+			cv2.patchNaNs(img1, 0)
+			gp.append(img1)
 		else:
 			gp.append(img)
 	if ret_wp:
@@ -66,28 +118,42 @@ def gaussian_pyr(img, depth, w = None, lpw = 0.0, ret_wp = False):
 	else:
 		return gp
 
-def laplacian_pyr(img, depth, gp = None, w = None, lpw = 0.0):
+def laplacian_pyr(img, depth, gp = None, w = None, lpw = 0.0, shape = None):
+	if shape is None:
+		try:
+			shape = img.shape
+		except:
+			shape = img.get().shape
+
+	img = cv2.UMat(img)
+
 	wp = None
 	if gp is None:
 		gp, wp = gaussian_pyr(img, depth, w = w, lpw = lpw, ret_wp = True)
 		
 	lp = [ gp[-1] ]
 	for i in range(depth,0,-1):
-		size = (gp[i - 1].shape[1], gp[i - 1].shape[0])
+		size = pyr_size(shape, i - 1) #(gp[i - 1].shape[1], gp[i - 1].shape[0])
 		up = cv2.pyrUp(gp[i], dstsize = size)
 		lap = cv2.subtract(gp[i-1], up)
 		if wp is not None:
-			lap[wp[i-1] == 0.0] = 0.0
+			mask = cv2.compare(wp[i-1], 0.0, cv2.CMP_EQ)
+			cv2.subtract(lap, lap, lap, mask = mask)
+			#lap[wp[i-1] == 0.0] = 0.0
 		lp.append(lap)
 	return lp[::-1]
 
-def lp_collapse(pyr):
+def lp_collapse(pyr, shape = None):
+	if shape is None:
+		shape = pyr[0].get().shape
+
 	depth = len(pyr)
 	up = pyr[-1]
 	for i in range(depth - 2, -1, -1):
-		size = (pyr[i].shape[1], pyr[i].shape[0])
+		size = pyr_size(shape, i)
+		#size = (pyr[i].shape[1], pyr[i].shape[0])
 		up = cv2.pyrUp(up, dstsize = size)
-		up = up + pyr[i]
+		up = cv2.add(up, pyr[i])
 	return up
 
 def remap_f_(img, g, sigma, fact):
@@ -97,10 +163,18 @@ def remap_f_(img, g, sigma, fact):
 	return res
 
 def remap_f(img, g, sigma, lin):
-	return (1.0 - lin) * gauss_s_curve(img, g, sigma) + lin * img
+	ret = cv2.addWeighted(gauss_s_curve(img, g, sigma), 1.0 - lin, img, lin, 0)
+	#cv2.imshow("remap", ret)
+	#cv2.waitKey(3000)
+	return ret
+	#return (1.0 - lin) * gauss_s_curve(img, g, sigma) + lin * img
 
-def local_laplacian_pyr(img, depth, sigma, fact, l_min = 0, l_max = 0, w = None, lpw = 0.0):
+def local_laplacian_pyr(img, depth, sigma, fact, l_min = 0, l_max = 0, w = None, lpw = 0.0, shape=None):
 
+	if shape is None:
+		shape = img.shape
+	img = cv2.UMat(img)
+	
 	if l_max <= l_min:
 		return laplacian_pyr(img, depth, w = w, lpw = lpw)
 
@@ -108,7 +182,7 @@ def local_laplacian_pyr(img, depth, sigma, fact, l_min = 0, l_max = 0, w = None,
 
 	gp = gaussian_pyr(img, depth, w = w, lpw = lpw)
 
-	res = laplacian_pyr(img, depth, gp = gp)
+	res = laplacian_pyr(img, depth, gp = gp, shape = shape)
 
 	steps = min(int(2.0 / sigma ) + 1, 100)
 	
@@ -121,15 +195,24 @@ def local_laplacian_pyr(img, depth, sigma, fact, l_min = 0, l_max = 0, w = None,
 
 
 		for i in range(l_min, l_max):
-			where = np.where((gp[i] >= low_g) & (gp[i] <= high_g))
-			blend = (gp[i][where] - low_g) * steps
-			res[i][where] = lp_lo[i][where] * (1.0 - blend) + lp_hi[i][where] * blend
+			#where = np.where((gp[i] >= low_g) & (gp[i] <= high_g))
+			mask = cv2.inRange(gp[i], low_g, high_g)
+			#blend = (gp[i][where] - low_g) * steps
+			blend2 = cv2.subtract(gp[i], low_g)
+			cv2.multiply(blend2, steps, blend2)
+			blend1 = cv2.subtract(1.0, blend2)
+			cv2.multiply(blend1, lp_lo[i], blend1)
+			cv2.multiply(blend2, lp_hi[i], blend2)
+			cv2.add(blend1, blend2, res[i], mask = mask)
+			#res[i][where] = lp_lo[i][where] * (1.0 - blend) + lp_hi[i][where] * blend
 		
 		lp_lo = lp_hi
+	
 	return res
 
 
 def pyr_merge(imgs, depth = 5, p = 1.0):
+	shape = imgs[0][0].shape
 
 	res_pyr = None
 	weight_pyr = None
@@ -137,7 +220,7 @@ def pyr_merge(imgs, depth = 5, p = 1.0):
 	for i, (img, w, lpw, lap_sigma, lap_lin, lap_l_min, lap_l_max) in enumerate(imgs):
 		
 		#lp = laplacian_pyr(img, depth, wp = wp, lpw = lpw)
-		lp = local_laplacian_pyr(img, depth, lap_sigma, lap_lin, lap_l_min, lap_l_max, w = w, lpw = lpw)
+		lp = local_laplacian_pyr(img, depth, lap_sigma, lap_lin, lap_l_min, lap_l_max, w = w, lpw = lpw, shape=shape)
 		
 		#w = merge_weight(img, lp)
 		#cv2.imshow("w%d" %i, w)
@@ -147,24 +230,25 @@ def pyr_merge(imgs, depth = 5, p = 1.0):
 		for i, wp1 in enumerate(wp):
 			if i < lap_l_min:
 				wp[i][:,:] = 0.00001
-			wp[i] = wp[i] ** p
+			cv2.pow(wp[i], p, wp[i])
 		
 		lpw = []
 		for lp1, wp1 in zip(lp, wp):
-			lpw.append(lp1 *  wp1)
+			lpw.append(cv2.multiply(lp1,  wp1))
 		
 		if res_pyr is None:
 			res_pyr = lpw
 			weight_pyr = wp
 		else:
 			for r1, w1, lpw1, wp1 in zip(res_pyr, weight_pyr, lpw, wp):
-				r1 += lpw1
-				w1 += wp1
+				cv2.add(r1, lpw1, r1)
+				cv2.add(w1, wp1, w1)
+	
 	for i, w1 in enumerate(weight_pyr):
-		res_pyr[i] = cv2.divide(res_pyr[i], w1)
+		cv2.divide(res_pyr[i], w1, res_pyr[i])
+
 	
-	
-	return lp_collapse(res_pyr)
+	return lp_collapse(res_pyr, shape=shape).get()
 
 
 def star_erode(img, r):
@@ -257,12 +341,24 @@ class Layer(ProcBase):
 			lp = laplacian_pyr(img, 2)
 			for i, lr in enumerate([self.l0reduce, self.l1reduce]):
 				if lr > 0:
-					alp = np.abs(lp[i])
-					lp[i] *= 1.0 - alp / (alp + lr)
+					alp = cv2.subtract(0, lp[i])
+					sign = cv2.compare(alp, 0, cv2.CMP_LT)
+					cv2.subtract(0, alp, alp, mask=sign)
+
+					#cv2.abs(lp[i])
+					#lp[i] *= 1.0 - alp / (alp + lr)
+					mul = cv2.add(alp, lr)
+					cv2.divide(alp, mul, mul)
+					cv2.subtract(1.0, mul, mul)
+					
+					cv2.multiply(lp[i], mul, lp[i])
+					
 				else:
-					lp[i][:, :] = 0
-			lp[2][:, :] = 0
-			img -= lp_collapse(lp)
+					cv2.multiply(lp[i], 0, lp[i])
+					#lp[i][:, :] = 0
+			#lp[2][:, :] = 0
+			cv2.multiply(lp[2], 0, lp[2])
+			img -= lp_collapse(lp).get()
 
 
 		if self.erode > 0:
@@ -303,9 +399,9 @@ class Layer(ProcBase):
 
 class Color(ProcBase):
 	yaml_tag = u'!Color'
-	params = ['thr', 'offset', 'offset_r', 'offset_b', 'high_pass', 'hp_r1', 'hp_r2', 'gf_r', 'gf_eps', 'red', 'blue', 'saturation', 'wb_r', 'wb_b', 'r_g', 'b_g', 'scnr', 'mask_w', 'mask_sat', 'c_red', 'c_blue', 'matrix']
+	params = ['thr', 'offset', 'offset_r', 'offset_b', 'high_pass', 'hp_r1', 'hp_r2', 'gf_r', 'gf_eps', 'red', 'blue', 'saturation', 'wb_r', 'wb_b', 'r_g', 'b_g', 'scnr', 'mask_w', 'mask_sat', 'mask_thr', 'c_red', 'c_blue', 'matrix']
 
-	def __init__(self, thr=0.0, offset=0.0, offset_r=0.0, offset_b=0.0, high_pass=0.0, hp_r1=1, hp_r2=1, gf_r=0, gf_eps=0.01, red=0.3, green=0.6, blue=0.1, saturation=1.0, wb_r=1.0, wb_b=1.0, r_g=0.0, b_g=0.0, scnr=0, mask_w=1.0, mask_sat=1.0, c_red=None, c_blue=None, matrix=None):
+	def __init__(self, thr=0.0, offset=0.0, offset_r=0.0, offset_b=0.0, high_pass=0.0, hp_r1=1, hp_r2=1, gf_r=0, gf_eps=0.01, red=0.3, green=0.6, blue=0.1, saturation=1.0, wb_r=1.0, wb_b=1.0, r_g=0.0, b_g=0.0, scnr=0, mask_w=1.0, mask_sat=1.0, mask_thr=0.0, c_red=None, c_blue=None, matrix=None):
 		for p in self.__class__.params:
 			self.__dict__[p] = vars()[p]
 
@@ -390,7 +486,6 @@ class Color(ProcBase):
 		r2 = self.hp_r2 * 2 + 1
 		hp = l_channel - cv2.GaussianBlur(l_channel, (r1, r1), 0)
 		hp = np.abs(hp)
-		print(r2)
 		hp = cv2.GaussianBlur(hp, (r2, r2), 0)
 		hp *= self.high_pass
 
@@ -406,27 +501,29 @@ class Color(ProcBase):
 		
 		r_pyr = laplacian_pyr(cr_channel, 8, w = over_mask, lpw = 1.0)
 		b_pyr = laplacian_pyr(cb_channel, 8, w = over_mask, lpw = 1.0)
-		cr_channel = lp_collapse(r_pyr)
-		cb_channel = lp_collapse(b_pyr)
+		cr_channel = lp_collapse(r_pyr).get()
+		cb_channel = lp_collapse(b_pyr).get()
 
 		over_mask = np.clip(over_mask - mask * self.mask_w, 0, 1)
 
 		r_pyr = laplacian_pyr(cr_channel, 8, w = over_mask, lpw = 1.0)
 		b_pyr = laplacian_pyr(cb_channel, 8, w = over_mask, lpw = 1.0)
-		cr_channel_masked = lp_collapse(r_pyr)
-		cb_channel_masked = lp_collapse(b_pyr)
+		cr_channel_masked = lp_collapse(r_pyr).get()
+		cb_channel_masked = lp_collapse(b_pyr).get()
 		
+		l_channel_bg = l_channel - cv2.erode(l_channel, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (20,20)))
+		mask_sat = self.mask_sat * l_channel_bg / np.maximum(l_channel_bg + self.mask_thr, 1.0e-12)
 		
-		cr_channel = (cr_channel - cr_channel_masked) * self.mask_sat + cr_channel_masked
-		cb_channel = (cb_channel - cb_channel_masked) * self.mask_sat + cb_channel_masked
+		cr_channel = (cr_channel - cr_channel_masked) * mask_sat + cr_channel_masked
+		cb_channel = (cb_channel - cb_channel_masked) * mask_sat + cb_channel_masked
 
 		col = cv2.merge((l_channel + cr_channel * (1.0 - self.c_red) , l_channel - cr_channel * (1.0 - self.c_red) * self.c_red / self.c_green - cb_channel * (1.0 - self.c_blue) * self.c_blue / self.c_green , l_channel +  cb_channel * (1.0 - self.c_blue)))
-
 
 		if self.gf_r > 0:
 			#filt2 = GuidedFilter(l_channel, self.gf_r, self.gf_eps ** 2)
 			filt2 = GuidedFilter(img, self.gf_r, self.gf_eps ** 2)
 			#col = filt2.filter(col)
+			#filt2 = cv2.ximgproc.createGuidedFilter(img, self.gf_r, self.gf_eps)
 
 			cr_channel = filt2.filter(cr_channel)
 			cb_channel = filt2.filter(cb_channel)
@@ -445,7 +542,6 @@ class Color(ProcBase):
 		cv2.imshow("r", cr_channel * 0.5 + 0.5)
 		cv2.imshow("b", cb_channel * 0.5 + 0.5)
 		cv2.imshow("m", over_mask)
-		print(over_mask)
 
 		return l_channel, cr_channel, cb_channel
 	
@@ -505,15 +601,12 @@ class RGB(ProcBase):
 
 class StarMask(ProcBase):
 	yaml_tag = u'!StarMask'
-	params = ['channels', 'level', 'thr', 'dilate', 'blur']
+	params = ['channels', 'level', 'min_level', 'thr', 'dilate', 'blur']
 
-	def __init__(self, channels=1, level=3, thr=4, dilate=1, blur=1):
+	def __init__(self, channels=1, level=3, min_level=0, thr=4, dilate=1, blur=1):
 		print("starmask init")
-		self.channels = channels
-		self.level = level
-		self.thr = thr
-		self.dilate = dilate
-		self.blur = blur
+		for p in self.__class__.params:
+			self.__dict__[p] = vars()[p]
 	
 	def __repr__(self):
 		return "%s(channels=%r, level=%r, thr=%r, dilate=%r, blur=%r)" % (
@@ -536,12 +629,14 @@ class StarMask(ProcBase):
 			
 			mp = []
 			
-			for lp1 in lp[0:self.level]:
-				sigma = noise_level(lp1)
-				print("sigma", sigma)
-				mask = lp1 > self.thr * sigma
-				mask = mask.astype(np.uint8)
-				print(mask)
+			for i, lp1 in enumerate(lp[0:self.level]):
+				if i >= self.min_level:
+					sigma = noise_level(lp1)
+					print("sigma", sigma)
+					mask = lp1.get() > self.thr * sigma
+					mask = mask.astype(np.uint8)
+				else:
+					mask = np.zeros_like(lp1.get(), dtype=np.uint8)
 				mp.append(mask)
 		
 			if gmp is None:
@@ -551,13 +646,15 @@ class StarMask(ProcBase):
 					gmp[i] += mp1
 
 		for i, mp1 in enumerate(gmp):
+			print(mp1)
 			mp1 = np.array(mp1 >= self.channels, dtype=np.float32)
 			mp1 = up_dilate(mp1, self.dilate * 2 + 1)
 			gmp[i] = mp1
 		
 		up = gmp[-1]
 		for i in range(self.level - 2, -1, -1):
-			size = (gmp[i].shape[1], gmp[i].shape[0])
+			size = pyr_size(img.shape, i)
+			#size = (gmp[i].shape[1], gmp[i].shape[0])
 			print(up.shape, gmp[i].shape)
 			up = cv2.pyrUp(up, dstsize = size)
 			up += gmp[i]
@@ -789,6 +886,7 @@ class GuiColor(GuiBase, Color):
 		cv2.createTrackbar('scnr', name, self.scnr, 6, self.update)
 		cv2.createTrackbar('mask_w', name, int(self.mask_w * 100), 1000, self.update)
 		cv2.createTrackbar('mask_sat', name, int(self.mask_sat * 500), 1000, self.update)
+		cv2.createTrackbar('mask_thr', name, int(self.mask_thr**(1.0/3.0) * 1000.0), 1000, self.update)
 		
 		cv2.createTrackbar('show_gamma', name, 100, 1000, self.update)
 		self.img2 = None
@@ -816,6 +914,7 @@ class GuiColor(GuiBase, Color):
 		
 		self.mask_w = cv2.getTrackbarPos('mask_w', self.name) / 100.0
 		self.mask_sat = cv2.getTrackbarPos('mask_sat', self.name) / 500.0
+		self.mask_thr = (float(cv2.getTrackbarPos('mask_thr', self.name)) / 1000.0) ** 3 + 0.000000001
 		
 		show_gamma = cv2.getTrackbarPos('show_gamma', self.name)
 		
@@ -909,15 +1008,17 @@ class GuiStarMask(GuiBase, StarMask):
 		StarMask.__init__(self, *args, **kwargs)
 
 		cv2.createTrackbar('channels', name, self.channels, 4, self.update)
-		cv2.createTrackbar('level', name, self.level -  1, 5, self.update)
-		cv2.createTrackbar('thr', name, self.thr, 1000, self.update)
+		cv2.createTrackbar('level', name, self.level -  1, 8, self.update)
+		cv2.createTrackbar('min_level', name, self.min_level, 8, self.update)
+		cv2.createTrackbar('thr', name, int(self.thr**(1.0/2.0) * 10.0), 1000, self.update)
 		cv2.createTrackbar('dilate', name, self.dilate, 30, self.update)
 		cv2.createTrackbar('blur', name, int(self.blur * 10), 100, self.update)
 		
 	def update_params(self):
 		self.channels = cv2.getTrackbarPos('channels', self.name)
 		self.level = cv2.getTrackbarPos('level', self.name) + 1
-		self.thr = cv2.getTrackbarPos('thr', self.name)
+		self.min_level = cv2.getTrackbarPos('min_level', self.name) 
+		self.thr = (float(cv2.getTrackbarPos('thr', self.name)) / 10.0) ** 2 + 0.000000001
 		self.dilate = cv2.getTrackbarPos('dilate', self.name)
 		self.blur = cv2.getTrackbarPos('blur', self.name) / 10.0
 	
@@ -1115,9 +1216,15 @@ def process(img, imc, layers, col, fusion, smask, cmask, rgb):
 		
 	if len(imgs) > 0:
 		lc = fusion.process(imgs)
-			
+
+
+		print("lc", np.isnan(lc))
+		print("cr", np.isnan(cr))
+		print("cb", np.isnan(cb))
+
 		col.img2 = lc
 		res = col.apply_col(lc, cr, cb)
+
 	return res
 
 
@@ -1166,6 +1273,9 @@ if args.outfile is not None:
 
 	res = np.clip(res * 65535, 0, 65535)
 	res = np.array(res, dtype=np.uint16)
+
+			
+
 	if res is not None:
 		tifffile.imsave(args.outfile, res)
 		sys.exit(0)
