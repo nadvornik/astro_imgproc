@@ -188,7 +188,7 @@ def poly_res(shape, coef, order = 3, scale = 1, darkframes = []):
 	
 	return np.dot(A, coef)
 
-def poly_fit(img, mask = None, order = 3, scale = 1, darkframes = []):
+def poly_fit(img, mask = None, order = 3, scale = 1, darkframes = [], sqrt_w = None):
 	YX = np.indices(img.shape, dtype = np.float64) * scale / 1000.0
 	X = YX[1]
 	Y = YX[0]
@@ -199,12 +199,18 @@ def poly_fit(img, mask = None, order = 3, scale = 1, darkframes = []):
 	af = img.ravel()
 	
 	df_ravel = []
+
+	if sqrt_w is not None:
+		sqrt_w = sqrt_w.ravel()
 	
 	if mask is not None:
 		nz = np.nonzero(mask.ravel())
 		Xf = Xf[nz]
 		Yf = Yf[nz]
 		af = af[nz]
+		
+		if sqrt_w is not None:
+			sqrt_w = sqrt_w[nz]
 		
 		for df in darkframes:
 			df_ravel.append(df.ravel()[nz])
@@ -217,7 +223,11 @@ def poly_fit(img, mask = None, order = 3, scale = 1, darkframes = []):
 	if len(df_ravel) > 0:
 		A = np.append(A, np.asarray(df_ravel).T, axis = 1)
 	
-	coef = np.linalg.lstsq(A, af)[0]
+	if sqrt_w is not None:
+		A = A * sqrt_w[:,np.newaxis]
+		af = af * sqrt_w
+	
+	coef = np.linalg.lstsq(A, af, rcond=-1)[0]
 	
 	ret = poly_res(img.shape, coef, order = order, scale = scale, darkframes = darkframes)
 	return ret, coef
@@ -259,16 +269,17 @@ def poly_bg(img, order = 3, scale = 8, it = 4, erode = 0, kappa = 2, transpmask 
 	eps = np.finfo(np.float32).eps * 2
 	
 	c_stddev = [0] * n_ch
+	sqrt_w = [None] * n_ch
 
 	for i in range(0, it):
 		coef_l = []
 		new_lowmask = np.ones((resize_h, resize_w), dtype = np.uint8) * 255
 		for c in range(0,n_ch):
-			grad, coef = poly_fit(img[c], mask = lowmask, order = order, scale = scale, darkframes = df_res)
-			print("g", grad.shape)
-			print("m", lowmask.shape)
+			grad, coef = poly_fit(img[c], mask = lowmask, order = min(i + 1, order), scale = scale, darkframes = df_res, sqrt_w = sqrt_w[c])
 			coef_l.append(coef)
 			diff = img[c] - grad
+			if i > it // 2:
+				sqrt_w[c] = (np.abs(diff) + 1e-12)** -0.25
 			mean, stddev = cv2.meanStdDev(diff, mask = lowmask)
 			
 			c_stddev[c] = float(stddev)
@@ -282,6 +293,7 @@ def poly_bg(img, order = 3, scale = 8, it = 4, erode = 0, kappa = 2, transpmask 
 
 		if save_mask is not None:
 			tifffile.imsave("%s%d.tif" % (save_mask, i), lowmask)
+			print("%s%d.tif" % (save_mask, i))
 	
 	if get_mask == True:
 		return lowmask, stddev
@@ -507,24 +519,24 @@ def noise_level(src):
 	noise = cv2.subtract(src, blur, dtype = cv2.CV_64FC1)
 	noise2 = cv2.pow(noise, 2)
 
-	avg, stddev = cv2.meanStdDev(noise)
+	var = cv2.mean(noise2)
 	try:
-		stddev = stddev.get()
+		var = var.get()
 	except:
 		pass
-	stddev = np.amax(stddev)
+	var = np.amax(var)
 	for i in range(0, 10):
-		print(stddev)
-		mask = cv2.inRange(noise2, -(stddev ** 2 * 4), stddev ** 2 * 4)
+		print(var ** 0.5)
+		mask = cv2.inRange(noise2, 0, var * 4)
 		#mask = np.amax(np.atleast_3d(mask), axis = 2)
-		avg, stddev = cv2.meanStdDev(noise, mask=mask)
+		var = cv2.mean(noise2, mask)
 		try:
-			stddev = stddev.get()
+			var = var.get()
 		except:
 			pass
-		stddev = np.amax(stddev)
+		var = np.amax(var)
 
-	return np.max(stddev)
+	return var ** 0.5
 
 
 def extrapolate_transp(img, transpmask, add = False):

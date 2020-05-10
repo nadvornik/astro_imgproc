@@ -8,9 +8,24 @@
 import queue
 import threading
 from line_profiler import LineProfiler
+import sys
+import traceback
+import time
+import gc
+
+def stacktraces():
+    code = []
+    for threadId, stack in sys._current_frames().items():
+        code.append("\n#\n# ThreadID: %s" % threadId)
+        for filename, lineno, name, line in traceback.extract_stack(stack):
+            code.append('File: "%s", line %d, in %s' % (filename, lineno, name))
+            if line:
+                code.append("  %s" % (line.strip()))
+
+    print("\n".join(code))
 
 
-def execute(q, func, lock):
+def execute(q, func, lock, i):
 	profiler = LineProfiler()
 	profiler.add_function(func)
 	profiler.enable_by_count()
@@ -18,16 +33,19 @@ def execute(q, func, lock):
 
 	while True:
 		try:
-			i = q.get(block = False)
+			task = q.get(block = False)
 		except:
 			break
-		func(i, lock)
+		func(task, lock)
 		res = True
-#	if res:
-#		with lock:
-#			profiler.print_stats()
+		if i == 0:
+			gc.collect()
+	if res:
+		with lock:
+			profiler.print_stats()
+	stacktraces()
 
-def pfor(func, r, threads = 8):
+def pfor(func, r, threads = 6):
 	lock = threading.Lock()
 	q = queue.Queue()
 	for i in r:
@@ -36,11 +54,12 @@ def pfor(func, r, threads = 8):
 	tt = []
 	for i in range(threads):
 		if threads == 1:
-			execute(q,func, lock)
+			execute(q,func, lock, i)
 		else:
-			t = threading.Thread(target=execute, args = (q,func, lock))
+			t = threading.Thread(target=execute, args = (q,func, lock, i))
 			t.start()
 			tt.append(t)
+			time.sleep(1)
 	
 	for t in tt:
 		t.join()

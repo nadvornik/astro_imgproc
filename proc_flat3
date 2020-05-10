@@ -9,7 +9,8 @@ import cv2
 import tifffile
 import argparse
 
-from astro_utils import sigma_clip
+from astro_utils import sigma_clip, imgread
+from astropy.io import fits
 
 parser = argparse.ArgumentParser()
 parser.add_argument("outfile",
@@ -26,7 +27,7 @@ parser.add_argument("--blur", type=int, default=200,
                     help="blur size")
 parser.add_argument("--lowmask", type=int, default=4,
                     help="lowmask iterations")
-
+parser.add_argument("--mono", action='store_true', default=False)
 args = parser.parse_args()
 
 
@@ -36,10 +37,10 @@ def flat_coef(img_b):
 	          (np.average(img_b[1::2, 0::2]) + np.average(img_b[0::2, 1::2])) / 2, 
 	          np.average(img_b[1::2, 1::2]))
 
-darkframe_avg = 1024
+darkframe_avg = 0
 
 if args.darkframe:
-	darkframe = tifffile.imread(args.darkframe)
+	darkframe = imgread(args.darkframe)[0]
 	darkframe = np.atleast_3d(darkframe)[:, :, 0]
 	darkframe_avg = np.median(darkframe)
 	print("darkframe_avg: ", darkframe_avg)
@@ -48,7 +49,7 @@ scale = 0.0
 imgs = None
 
 for i, flat in enumerate(args.flat):
-	img_b = tifffile.imread(flat)
+	img_b = imgread(flat)[0]
 	if args.darkframe and args.apply_darkframe:
 		img_b = cv2.subtract(img_b, darkframe)
 	else:
@@ -56,21 +57,28 @@ for i, flat in enumerate(args.flat):
 
 	img_float = np.array(img_b, dtype=np.float)
 
-	scale_rgb = flat_coef(img_float)
-	print("scale_rgb: ", scale_rgb)
+	if args.mono:
+		scale1 = np.median(img_float)
+		print("scale1: ", scale1)
+		scale = max(scale, scale1)
+		img_float /= scale1
+	else:
+		scale_rgb = flat_coef(img_float)
+		print("scale_rgb: ", scale_rgb)
 
-	scale = max(scale, *scale_rgb)
+		scale = max(scale, *scale_rgb)
 
 	
-	img_float[0::2, 0::2] = img_float[0::2, 0::2] / scale_rgb[0]
-	img_float[1::2, 0::2] = img_float[1::2, 0::2] / scale_rgb[1]
-	img_float[0::2, 1::2] = img_float[0::2, 1::2] / scale_rgb[1]
-	img_float[1::2, 1::2] = img_float[1::2, 1::2] / scale_rgb[2]
+		img_float[0::2, 0::2] = img_float[0::2, 0::2] / scale_rgb[0]
+		img_float[1::2, 0::2] = img_float[1::2, 0::2] / scale_rgb[1]
+		img_float[0::2, 1::2] = img_float[0::2, 1::2] / scale_rgb[1]
+		img_float[1::2, 1::2] = img_float[1::2, 1::2] / scale_rgb[2]
 
 	if imgs is None:
 		imgs = np.empty((len(args.flat), img_float.shape[0], img_float.shape[1]), dtype=np.float)
 	imgs[i] = img_float
 
+scale *= 0.9
 print("scale: ", scale)
 imgs *= scale
 
@@ -79,6 +87,14 @@ imgs *= scale
 avg, num, outsigma = sigma_clip(imgs)
 
 avg = cv2.add(avg, darkframe_avg, dtype=cv2.CV_16UC1)
+
+if args.outfile.endswith('.fits'):
+	hdulist = fits.open(args.flat[0])
+	hdulist[0].data = avg
+
+	hdulist.writeto(args.outfile, overwrite=True)
+	sys.exit(0)
+
 
 tifffile.imsave(args.outfile, avg)
 

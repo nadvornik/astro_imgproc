@@ -14,9 +14,9 @@ import tifffile
 import argparse
 import sys
 from astro_utils import rawread, normalize, debayer, hp_filt_bayer, hp_filt_rgb, hp_filt_mono, poly_bg, fit_images, combine_images
+from astropy.io import fits
 
-
-def apply_flat(img, flats, coefs, log = False):
+def apply_flat(img, flats, coefs, log = False, mono = False):
 	if log:
 		flat = np.ones(img.shape, dtype=np.float32)
 		for i, f in enumerate(flats):
@@ -29,21 +29,26 @@ def apply_flat(img, flats, coefs, log = False):
 			flat += f * coefs[i]
 
 	flat[np.where(flat <= 0)] = 1
-			
-	flat_bl_b = cv2.blur(flat[0::2, 0::2], (100, 100))
-	flat_bl_r = cv2.blur(flat[1::2, 1::2], (100, 100))
-	flat_bl_g1 = cv2.blur(flat[0::2, 1::2], (100, 100))
-	flat_bl_g2 = cv2.blur(flat[1::2, 0::2], (100, 100))
 	
-	max_b = np.amax(flat_bl_b)
-	max_g = (np.amax(flat_bl_g1) + np.amax(flat_bl_g2)) / 2.0
-	max_r = np.amax(flat_bl_r)
+	if mono:
+		flat_bl = cv2.blur(flat, (100, 100))
+		maxf = np.amax(flat_bl)
+		mulmat = maxf / flat
+	else:
+		flat_bl_b = cv2.blur(flat[0::2, 0::2], (100, 100))
+		flat_bl_r = cv2.blur(flat[1::2, 1::2], (100, 100))
+		flat_bl_g1 = cv2.blur(flat[0::2, 1::2], (100, 100))
+		flat_bl_g2 = cv2.blur(flat[1::2, 0::2], (100, 100))
 	
-	mulmat = np.empty_like(flat)
-	mulmat[0::2, 0::2] = max_b / flat[0::2, 0::2]
-	mulmat[1::2, 1::2] = max_r / flat[1::2, 1::2]
-	mulmat[0::2, 1::2] = max_g / flat[0::2, 1::2]
-	mulmat[1::2, 0::2] = max_g / flat[1::2, 0::2]
+		max_b = np.amax(flat_bl_b)
+		max_g = (np.amax(flat_bl_g1) + np.amax(flat_bl_g2)) / 2.0
+		max_r = np.amax(flat_bl_r)
+	
+		mulmat = np.empty_like(flat)
+		mulmat[0::2, 0::2] = max_b / flat[0::2, 0::2]
+		mulmat[1::2, 1::2] = max_r / flat[1::2, 1::2]
+		mulmat[0::2, 1::2] = max_g / flat[0::2, 1::2]
+		mulmat[1::2, 0::2] = max_g / flat[1::2, 0::2]
 	return cv2.multiply(img, mulmat, dtype=cv2.CV_32FC1)
 
 def hotpix_find(img):
@@ -184,17 +189,21 @@ if args.outbayer is not None:
 
 img = cv2.subtract(img, minval)
 
-if args.outfile is not None and args.mono:
-	img = cv2.add(img, args.zero, dtype = cv2.CV_16UC1)
-	tifffile.imsave(args.outfile, img)
-	exit(0)
 
 flat = []
 if args.flat:
 	for d in args.flat:
 		f = rawread(d)[0]
-		f = cv2.subtract(f, minval)
+		
+		if f.ndim == 3:
+			f = f[:,:,0]
+# FIXME		f = cv2.subtract(f, minval)
 		flat.append(f)
+
+		print("flat shape", f.shape)
+
+
+print("img shape", img.shape)
 
 if len(flat) > 0:
 	flat = flat[0:1]
@@ -227,24 +236,32 @@ if len(flat) > 0:
 
 	print(coefs)
 	
-	img = apply_flat(img, flat, coefs, log = log)
+	img = apply_flat(img, flat, coefs, log=log, mono=args.mono)
 	print(img.shape)
 		
 
-img = cv2.multiply(img, 65535.0 / float(maxval - minval), dtype = cv2.CV_16UC1)
+#if scale
+#img = cv2.multiply(img, 65535.0 / float(maxval - minval), dtype = cv2.CV_16UC1)
 
 #col = cv2.cvtColor(img, cv2.COLOR_BAYER_BG2RGB)
-col = debayer(img, filt = True)
+if args.mono:
+	col = np.atleast_3d(img)
+	n_channels = 1
+	res_type = cv2.CV_16UC1
+else:
+	col = debayer(img, filt = True)
+	n_channels = 3
+	res_type = cv2.CV_16UC3
 
 if args.median_bg > 0:
 	bg = np.empty_like(col, dtype=np.float32)
-	for i in range(0, 3):
+	for i in range(0, n_channels):
 		bg[:, :, i] = gradient_dif_filter2(np.array(col[:, :, i], dtype=np.float32), 0, args.median_bg)
 	bg -= args.zero
-	col = cv2.subtract(col, bg, dtype = cv2.CV_16UC3)
+	col = cv2.subtract(col, bg, dtype = res_type)
 
 
-if args.poly_bg > 0:
+elif args.poly_bg > 0:
 	bg_img = []
 
 	if len(dark) > 0  and args.dark_bg:
@@ -274,12 +291,23 @@ if args.poly_bg > 0:
 	
 	bg = poly_bg(col, order = args.poly_bg, scale = args.scale, erode = args.erode, it = args.iter, kappa = args.poly_bg_kappa, darkframes = bg_img)
 	bg -= args.zero
-	col = cv2.subtract(col, bg, dtype = cv2.CV_16UC3)
+	col = cv2.subtract(col, bg, dtype = res_type)
 else:
-	col = cv2.add(col, (args.zero, args.zero, args.zero, 0), dtype = cv2.CV_16UC3)
+	if args.mono:
+		col = cv2.add(col, args.zero, dtype = cv2.CV_16UC1)
+	else:
+		col = cv2.add(col, (args.zero, args.zero, args.zero, 0), dtype = cv2.CV_16UC3)
 
 if args.outfile is not None:
-	tifffile.imsave(args.outfile, col)
+	if args.outfile.endswith('.fits'):
+		hdulist = fits.open(args.infile)
+		hdulist[0].data = col
+
+		hdulist.writeto(args.outfile, overwrite=True)
+		sys.exit(0)
+
+	else:
+		tifffile.imsave(args.outfile, col)
 
 if args.outrgb is not None:
 	for i in range(0, 3):

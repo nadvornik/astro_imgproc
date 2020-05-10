@@ -134,7 +134,7 @@ if args.outfile.endswith('.fits'):
 	hdulist = fits.open(args.infile[0])
 	hdulist[0].data = outc16[:, :, 0]
 	
-	hdulist.writeto(args.outfile)
+	hdulist.writeto(args.outfile, overwrite=True)
 	sys.exit(0)
 
 

@@ -28,7 +28,7 @@ import time
 
 from astro_utils import noise_level, poly_bg, poly_res, poly_array,  extrapolate_transp
 from centroid import centroid, sym_center
-
+from detect_lines import detect_lines, draw_lines
 from scipy.optimize import curve_fit
 
 cv2.setNumThreads(-1)
@@ -126,6 +126,10 @@ parser.add_argument("--cut-out", type=float, default=1,
 parser.add_argument("--dering", type=float, default=0.9,
                     help="deringing")
 parser.add_argument("--dering2", type=float, default=1,
+                    help="deringing")
+parser.add_argument("--dering2-radius", type=int, default=13,
+                    help="deringing")
+parser.add_argument("--dering2-thr", type=float, default=3,
                     help="deringing")
 
 
@@ -707,7 +711,16 @@ def rrrl_simple(src, psf, it):
 	return res, target
 		
 
-
+optimal_dft_size_cache = {}
+def optimal_dft_size(s):
+	if s in optimal_dft_size_cache:
+		return optimal_dft_size_cache[s]
+	r = int(cv2.getOptimalDFTSize(s))
+	while r in [1875, 2025, 2160, 2304, 2400, 2430, 2500, 2560, 2592, 2700, 2880]:
+		r = int(cv2.getOptimalDFTSize(r + 1))
+	optimal_dft_size_cache[s] = r
+	print("optimal_dft_size_cache %d: %d" % (s, r))
+	return r
 
 class PsfGauss:
 	def __init__(self, size, sigma):
@@ -825,7 +838,7 @@ class PsfMoffat:
 		else:
 			to_mat = False
 			
-		dft_shape = (cv2.getOptimalDFTSize(img_shape[0] + self.shape[0]), cv2.getOptimalDFTSize(img_shape[1] + self.shape[1]))
+		dft_shape = (optimal_dft_size(img_shape[0] + self.shape[0]), optimal_dft_size(img_shape[1] + self.shape[1]))
 
 		eimg = cv2.copyMakeBorder(cv2.UMat(img), top=0, bottom=dft_shape[0]-img_shape[0], left=0, right=dft_shape[1]-img_shape[1], borderType=cv2.BORDER_CONSTANT, value=0)
 		epsf = cv2.copyMakeBorder(cv2.UMat(self.psf), top=0, bottom=dft_shape[0]-self.shape[0], left=0, right=dft_shape[1]-self.shape[1], borderType=cv2.BORDER_CONSTANT, value=0)
@@ -872,7 +885,7 @@ class Psf:
 		if len(psflist) == 0:
 			return self.gaussian(None, 1.0)
 		#psf = rrrl_simple(psflist, PsfMoffat(args.diameter * 2 + 1, 3, 2), 30)
-		psf, target = rrrl_simple(psflist, PsfGauss(args.diameter * 2 + 1, psf_filter_sigma), 30)
+		psf, target = rrrl_simple(psflist, PsfGauss(args.diameter * 2 + 1, psf_filter_sigma), 60)
 		
 #		psfgrad = (cv2.Sobel(psf, -1, 1,0,ksize=3)**2 + cv2.Sobel(psf, -1, 0,1,ksize=3)**2) ** 0.5
 		#psfgrad2 = (cv2.Sobel(psfgrad, -1, 1,0,ksize=3)**2 + cv2.Sobel(psfgrad, -1, 0,1,ksize=3)**2) ** 0.5
@@ -994,20 +1007,18 @@ class Psf:
 			self.thr_mask = cv2.dilate(self.thr_mask, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (int(args.diameter * 1.6), int(args.diameter * 1.6))))
 		
 			
-		rs = cv2.sumElems(res)[0]
-		if rs == 0:
-			return 1
+		#rs = cv2.sumElems(res)[0]
+		#if rs == 0:
+		#	return 1
 			
-		res = cv2.divide(res, rs)
-		#res = res / rs
+		#res = cv2.divide(res, rs)
 		
 		
-		dft_shape = (cv2.getOptimalDFTSize(shape[0] + self.shape[0]//2 - int(self.center[1]) + 1), 
-		             cv2.getOptimalDFTSize(shape[1] + self.shape[1]//2 - int(self.center[0]) + 1))
+		dft_shape = (optimal_dft_size(shape[0] + self.shape[0]//2 - int(self.center[1]) + 1), 
+		             optimal_dft_size(shape[1] + self.shape[1]//2 - int(self.center[0]) + 1))
+
 
 		cordat = cv2.multiply(cor_psf, dat)
-
-		edat = cv2.copyMakeBorder(dat, top=0, bottom=dft_shape[0]-shape[0], left=0, right=dft_shape[1]-shape[1], borderType=cv2.BORDER_CONSTANT, value=0)
 
 		res = cv2.flip(res, -1)
 		eres = cv2.copyMakeBorder(res, top=0, bottom=dft_shape[0]-shape[0], left=0, right=dft_shape[1]-shape[1], borderType=cv2.BORDER_CONSTANT, value=0)
@@ -1016,13 +1027,13 @@ class Psf:
 		edat = cv2.copyMakeBorder(dat, top=0, bottom=dft_shape[0]-shape[0], left=0, right=dft_shape[1]-shape[1], borderType=cv2.BORDER_CONSTANT, value=0)
 		DAT = cv2.dft(edat, flags=cv2.DFT_COMPLEX_OUTPUT, nonzeroRows = shape[0])
 		cv2.mulSpectrums(DAT, RES, 0, DAT)
-		edat = cv2.idft(DAT, flags=cv2.DFT_SCALE | cv2.DFT_REAL_OUTPUT )
+		cv2.idft(DAT, edat, flags=cv2.DFT_SCALE | cv2.DFT_REAL_OUTPUT )
 
 
 		ecordat = cv2.copyMakeBorder(cordat, top=0, bottom=dft_shape[0]-shape[0], left=0, right=dft_shape[1]-shape[1], borderType=cv2.BORDER_CONSTANT, value=0)
-		CORDAT = cv2.dft(ecordat, flags=cv2.DFT_COMPLEX_OUTPUT, nonzeroRows = shape[0])
-		cv2.mulSpectrums(CORDAT, RES, 0, CORDAT)
-		ecordat = cv2.idft(CORDAT, flags=cv2.DFT_SCALE | cv2.DFT_REAL_OUTPUT )
+		cv2.dft(ecordat, DAT, flags=cv2.DFT_COMPLEX_OUTPUT, nonzeroRows = shape[0])
+		cv2.mulSpectrums(DAT, RES, 0, DAT)
+		cv2.idft(DAT, ecordat, flags=cv2.DFT_SCALE | cv2.DFT_REAL_OUTPUT )
 		
 		
 #res = cv2.UMat(res, (psf_shape[0] // 2, psf_shape[0] // 2 + img_shape[0]), (psf_shape[1] // 2, psf_shape[1] // 2 + img_shape[1]))
@@ -1046,9 +1057,10 @@ class Psf:
 		#cor_psf /= np.mean(cor_psf)
 		#print cor_psf
 		#print "mean", np.mean(cor_psf)
+		cor_psf = cv2.medianBlur(cor_psf, 5)
+		cor_psf = cv2.GaussianBlur(cor_psf, (3,3), 0)
 		
 		m = np.sum(cor_psf * self.psf)
-		print("cor_psf mean", m)
 		
 		if np.isnan(m):
 			return 1.0
@@ -1061,14 +1073,15 @@ class Psf:
 		
 		cor_psf = np.clip(cor_psf, 0.0001, 10000)
 		
-		while np.amin(cor_psf) < 0.9 or np.amax(cor_psf) > 1.2:
-			print("cor_psf", cor_psf)
-			cor_psf **= 0.5
+		sc = 0
+#		while np.amin(cor_psf) < 1.0 - 0.6 / args.update_accel or np.amax(cor_psf) > 1.0 + 0.8 / args.update_accel:
+		while np.amin(cor_psf + 0.6 / self.accel_mask) < 1.0 or np.amax(cor_psf - 0.8 / self.accel_mask) > 1.0:
+			sc += 1
+			cor_psf **= 0.8
 		cv2t.imshow("cor_psf", normalize(cor_psf))
+		print("cor_psf mean", m, "scale", sc)
 		
-		cor_psf_bl = cv2.GaussianBlur(cor_psf,(3,3), 0)
-		cor_psf[args.diameter, args.diameter] = cor_psf_bl[args.diameter, args.diameter]
-		cor_psf **= self.accel_mask
+		cor_psf = (cor_psf - 1) * self.accel_mask + 1
 		
 		if np.all(cor_psf >= 0) and not np.isnan(cor_psf).any():
 			bl_dif = lowblur(self.psf, self.lo_thr, 1) - self.psf
@@ -1107,7 +1120,7 @@ class Psf:
 		anchor = (self.shape[0] // 2 + max(-y, 0), self.shape[1] // 2 + max(-x, 0))
 		psf_shape = (self.shape[0] + max(y, 0), self.shape[1] + max(x, 0))
 			
-		dft_shape = (cv2.getOptimalDFTSize(img_shape[0] + psf_shape[0] + max(-y, 0)), cv2.getOptimalDFTSize(img_shape[1] + psf_shape[1] + max(-x, 0)))
+		dft_shape = (optimal_dft_size(img_shape[0] + psf_shape[0] + max(-y, 0)), optimal_dft_size(img_shape[1] + psf_shape[1] + max(-x, 0)))
 
 		eimg = cv2.copyMakeBorder(cv2.UMat(img), top=0, bottom=dft_shape[0]-img_shape[0], left=0, right=dft_shape[1]-img_shape[1], borderType=cv2.BORDER_CONSTANT, value=0)
 		epsf = cv2.UMat(dft_shape[0], dft_shape[1], cv2.CV_32F, 0.0)
@@ -1115,11 +1128,11 @@ class Psf:
 
 		IMG = cv2.dft(eimg, flags=cv2.DFT_COMPLEX_OUTPUT, nonzeroRows = img_shape[0])
 		PSF = cv2.dft(epsf, flags=cv2.DFT_COMPLEX_OUTPUT, nonzeroRows = psf_shape[0])
-		RES = cv2.mulSpectrums(IMG, PSF, 0)
+		cv2.mulSpectrums(IMG, PSF, 0, IMG)
 
-		res = cv2.idft(RES, flags=cv2.DFT_SCALE | cv2.DFT_REAL_OUTPUT )
+		cv2.idft(IMG, eimg, flags=cv2.DFT_SCALE | cv2.DFT_REAL_OUTPUT )
 		#print("xy", x, y, "psf_shape", psf_shape, "anchor", anchor, "img_shape", img_shape, "dft_shape", dft_shape)
-		res = cv2.UMat(res, (anchor[0], anchor[0] + img_shape[0]), (anchor[1], anchor[1] + img_shape[1]))
+		res = cv2.UMat(eimg, (anchor[0], anchor[0] + img_shape[0]), (anchor[1], anchor[1] + img_shape[1]))
 		if to_mat:
 			return res.get()
 		return res
@@ -1418,7 +1431,7 @@ class TilePsf:
 			m.append(psf.update(t_cor_psf, t_dat, t_res, (elr[0] - eul[0], elr[1] - eul[1]), self.moffat, scale_only))
 		self.moffat_base = None
 		self.moffat = None
-		return np.median(m)
+		return np.mean(m)
 	
 	def interpolate(self, s):
 		if self.moffat_base is not None:
@@ -1433,6 +1446,7 @@ class TilePsf:
 		X = YX[1]
 		Y = YX[0]
 	
+		print("hfrlist", self.hfrlist)
 		a = np.array(self.hfrlist)
 	
 		Xf = X.ravel()
@@ -1441,6 +1455,10 @@ class TilePsf:
 		af = a[a != 0]
 		Xf = Xf[a != 0]
 		Yf = Yf[a != 0]
+	
+		if len(af) == 0:
+			self.hfr_field = np.ones((args.tiles, args.tiles), dtype=np.float32)
+			return
 	
 		A = poly_array(Xf, Yf, order = order)
 	
@@ -2162,6 +2180,7 @@ def mean_sigma_clip(a0, kappa=2, n=10, weights = None):
 	return m
 
 
+
 #########################################################################################################
 
 
@@ -2755,6 +2774,8 @@ background = None
 bright_w = [0] * outchannels
 ref_bg = [None] * outchannels
 
+lines = [None] * col
+
 it = args.iter
 
 for i in range(0, it):
@@ -2832,12 +2853,33 @@ for i in range(0, it):
 
 		scaled_src -= offset[outc]
 		
-		scaled_src -= pyr.upscale_to(src_lp_cor[c], scaled_src.shape)
+		
+		if src_lp_cor[c] is not None:
+			scaled_src -= pyr.upscale_to(src_lp_cor[c], scaled_src.shape)
+		else:
+			dif = scaled_src - b_res.get()
+			dif = gradient_dif_filter(dif, weight, args.gradient_radius)
+			
+			scaled_src -= dif
+			src_lp_cor[c] = pyr.downscale(dif, lp_depth_min)
 
 		scaled_src = cv2.UMat(scaled_src)
 
 		
 		dif = cv2.subtract(b_res, scaled_src)
+
+		if i == 3:
+			lines[c], mask = detect_lines(dif)
+			draw_lines(mask, lines[c], 127)
+			print("lines%d_%d.tif" % (i, c))
+			cv2.imwrite("lines%d_%d.tif" % (i, c), mask)
+			
+		
+		#if i < 8:
+		#	kwargs = {'planarconfig': 'contig', 'photometric' : 'minisblack'}
+		#	fn = "dif%02d_%04d.tif" % (i, c)
+		#	tifffile.imsave(fn, 0.5 - dif.get(), **kwargs)
+
 
 		print("maxval", c, maxval[c])
 		#where_over = np.where((src[c] > maxval[c] * args.overexp) & (scaled_src < b_res.get()))
@@ -2849,7 +2891,8 @@ for i in range(0, it):
 		
 		weight[where_over] /= 1.0 + (w_over * 100) ** 2
 		
-
+		if lines[c]:
+			draw_lines(weight, lines[c], 0)
 
 		#d = blur_dif(scaled_src, ref_bg[outc], cv2.divide(weight, ref_bg[outc]))
 		#cv2.add(scaled_src, d, scaled_src)
@@ -2857,6 +2900,9 @@ for i in range(0, it):
 		
 
 		cor = cv2.max(cv2.divide(scaled_src, b_res), 0.00001)
+		
+		#del b_res
+		
 		#cv2.patchNaNs(cor, 0.00001)
 		
 		#dif_mean = np.average(dif, weights = weight)
@@ -2874,9 +2920,10 @@ for i in range(0, it):
 			var_next[outc] += dat_m
 		
 		if not setup:
-			clip = np.where(np.logical_and(dat_m > var[outc] * kappa * kappa, dif.get() < 0))
+			#clip = np.where(np.logical_and(dat_m > var[outc] * kappa * kappa, dif.get() < 0))
+			clip = np.where(dat_m > var[outc] * kappa * kappa)
 			weight[clip] = 0
-		
+		#del dif
 		
 		
 
@@ -2898,10 +2945,11 @@ for i in range(0, it):
 			cv2.multiply(dat_psf, weight, dat_psf)
 			#dat_psf *= weight
 
-
-		dat = cv2.pow(cv2.add(dat, mean_dat / args.robustness**2), -0.25 * args.cut_out) #-0.3)
+		cv2.add(dat, mean_dat / args.robustness**2, dat)
+		cv2.pow(dat, -0.25 * args.cut_out, dat) #-0.3)
 		#dat = (dat + mean_dat / args.robustness**2) ** -0.25
 		cv2.multiply(dat, weight, dat)
+		#del weight
 		
 		hfr_f = psf[c].get_hfr_field(1.0 / med_hfr)
 		
@@ -2917,8 +2965,8 @@ for i in range(0, it):
 		
 		cv2.divide(dat, hfr_f, dat)
 		
-		cv2t.imshow("hfr_f", normalize(hfr_f.get()))
-		
+		#cv2t.imshow("hfr_f", normalize(hfr_f.get()))
+		#del hfr_f
 
 		dat = cv2.erode(dat, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3,3)))
 
@@ -2927,7 +2975,8 @@ for i in range(0, it):
 		#dat[clip] = 0
 		
 		
-		cor_psf = cor
+		cor_psf = cv2.pow(cor, 2)
+		#cor_psf = cv2.medianBlur(cor, 5)
 
 		
 		if setup:
@@ -2976,6 +3025,9 @@ for i in range(0, it):
 				for k in range(3):
 					b_res = psf[c].apply(u_res[outc])
 					cor_psf = cv2.max(cv2.divide(scaled_src, b_res), 0.00001)
+					cor_psf = cv2.pow(cor_psf, 2)
+#					cor_psf = cv2.medianBlur(cor_psf, 5)
+
 		
 					m = psf[c].update(cor_psf, dat_psf, u_res[outc])
 			
@@ -2999,7 +3051,6 @@ for i in range(0, it):
 			sum_w[outc] += w
 			sum_corw[outc] += corw
 
-		gc.collect()
 		print("end2 %d %d" %(i,c))
 	pfor.pfor(step2, list(range(0, col)) if i % 2 == 0 else reversed(list(range(0, col))))
 	
@@ -3024,8 +3075,7 @@ for i in range(0, it):
 	reg3.step1(res + offset, i < args.lambda_eval_iter, channel_weights = channel_weights, weights_a = sum_w)
 
 	print("cor_scales", cor_scales)
-	for outc in range(0, outchannels):
-	
+	def step3(outc, lock):
 		sc_var = np.mean(np.log(cor_scales[outmap == outc]) ** 2)
 		kappa = 2
 		while True:
@@ -3038,9 +3088,10 @@ for i in range(0, it):
 		print(scales)
 		for c in range(col):
 			if sc_where[c]:
-				mul = 1.0 / np.clip(cor_scales[c] ** 0.5, 0.7, 1.5)
-				scales[c] *= mul
-				src_lp_cor[c] *= mul
+				mul = 1.0 / np.clip(cor_scales[c] ** 0.3, 0.8, 1.3)
+				#scales[c] *= mul
+				#src_lp_cor[c] *= mul
+				src_lp_cor[c] = None
 		print(scales)
 	
 	
@@ -3108,37 +3159,55 @@ for i in range(0, it):
 		reg_m = cv2.min(reg, 0)
 	
 		#res[outc] *= cv2.divide(1 + reg_p, 1 - reg_m)
-		if not setup:
-			rings = res[outc]
-			#rings = cv2.subtract(cv2.multiply(rings, 2), cv2.GaussianBlur(rings, (3, 3), 0))
-			rings = cv2.dilate(rings, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9)))
+		if True: #not setup:
+			ures = cv2.UMat(res[outc])
+			rings = cv2.dilate(ures, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9)))
 			rings = cv2.erode(rings, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9)))
-			rings -= res[outc]
+			cv2.subtract(rings, res[outc], rings)
 			rings = cv2.max(rings, 0)
 		
 		
-			bg = cv2.erode(res[outc], cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7,7)), 4)
-			bg = cv2.blur(bg, (args.diameter, args.diameter))
-			bg = cv2.blur(bg, (args.diameter, args.diameter))
-			bg = cv2.blur(bg, (args.diameter, args.diameter))
-			bg = cv2.blur(bg, (args.diameter, args.diameter))
-			ringmask = cv2.max(res[outc] - bg, 0)
-			ringmask = ringmask / (ringmask + glob_var[outc]**0.5)
+			bg = cv2.erode(ures, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7,7)), 4)
+			bg = cv2.GaussianBlur(bg, (args.diameter * 2 + 1, args.diameter * 2 + 1), 0)
 			
-			ringmask = cv2.dilate(ringmask, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (13,13)))
-			cv2.subtract(ringmask, cv2.erode(ringmask, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (13,13))) * 2, ringmask)
+			ringmask = cv2.max(cv2.subtract(ures, bg), 0)
+			
+			rm_2 = cv2.pow(ringmask, 2)
+			rm_var = cv2.GaussianBlur(rm_2, (args.diameter * 2 + 1, args.diameter * 2 + 1), 0)
+			rm_var_glob = float(cv2.mean(rm_2)[0])
+
+			cv2.divide(ringmask, cv2.add(cv2.add(ringmask, cv2.multiply(cv2.pow(rm_var, 0.5), args.dering2_thr)), rm_var_glob**0.5), ringmask)
+
+			print("check ringmask", cv2.minMaxLoc(ringmask))
+			#cv2.threshold(ringmask, 0.1, 1, cv2.THRESH_TOZERO, ringmask)
+			
+			ringmask = cv2.dilate(ringmask, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (args.dering2_radius * 2 + 1,args.dering2_radius * 2 + 1)))
+			
+			ringmask_e = cv2.erode(ringmask, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (args.dering2_radius * 2 + 1, args.dering2_radius * 2 + 1)))
+			thr = float(cv2.mean(cv2.pow(ringmask_e, 2))[0]) ** 0.5
+			cv2.threshold(ringmask_e, thr, 1, cv2.THRESH_BINARY, ringmask_e)
+			
+			cv2.subtract(ringmask, ringmask_e, ringmask)
 			cv2.max(ringmask, 0, ringmask)
+
+			print("check ringmask2", cv2.minMaxLoc(ringmask), thr)
+			ringmask = cv2.GaussianBlur(ringmask, (5, 5), 0)
+
+			cv2.threshold(ringmask, thr * 3, 1, cv2.THRESH_TOZERO, ringmask)
+
+			#ringmask = cv2.pow(ringmask, 2)
 		
 			cv2.multiply(rings, ringmask, rings)
+			rings = cv2.GaussianBlur(rings, (3, 3), 0)
 			print("check rings", cv2.minMaxLoc(rings))
 			
-			
+			rings = rings.get()
 
 			reg += rings * args.dering2
 		
 			rings = np.clip(rings, 0, np.mean(rings) * 20)
 			cv2t.imshow("rings%d" % outc, normalize(rings))
-			cv2t.imshow("ringmask%d" % outc, normalize(ringmask))
+			cv2t.imshow("ringmask%d" % outc, normalize(ringmask.get()))
 
 
 		#cor = cv2.divide(sum_corw[outc] + reg_p, sum_w[outc] - reg_m)
@@ -3158,6 +3227,7 @@ for i in range(0, it):
 		avg, stddev = cv2.meanStdDev(res[outc])
 		
 		floodmask = np.zeros((res[outc].shape[0] + 2, res[outc].shape[1] + 2), dtype=np.uint8)
+		print(minVal, maxVal, minLoc, maxLoc)
 		cv2.floodFill(res[outc], floodmask, minLoc, 2, loDiff = 0, upDiff = (maxVal - minVal) * args.top_thres, flags = 256 + 8 + cv2.FLOODFILL_MASK_ONLY + cv2.FLOODFILL_FIXED_RANGE)
 		floodmask = floodmask[1:-1, 1:-1]
 		#cv2t.imshow("fm%d" % outc, normalize(floodmask))
@@ -3191,6 +3261,8 @@ for i in range(0, it):
 #			print("hfr", curhfr)
 			#if i < 3 and curhfr > 2:
 			#	res = cv2.erode(res, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3,3)))
+	pfor.pfor(step3, list(range(0, outchannels)))
+
 
 	if args.update_iter > 0 and i > args.update_iter:
 #		hfr_list = []
